@@ -1,0 +1,3859 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Labkom" />
+  <title>Laboratorium Komputer (Labkom) — Local-First Google Drive PWA</title>
+
+  <!-- Google Font: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Client-Side Export Libraries: SheetJS (.xlsx), docx (.docx), jsPDF + AutoTable (.pdf) -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+
+  <style>
+    :root {
+      --sat: env(safe-area-inset-top, 0px);
+      --sab: env(safe-area-inset-bottom, 0px);
+    }
+    * {
+      -webkit-tap-highlight-color: transparent;
+    }
+    html, body {
+      font-family: 'Inter', system-ui, sans-serif;
+      overscroll-behavior-y: none;
+    }
+    .pt-safe {
+      padding-top: max(0.75rem, env(safe-area-inset-top));
+    }
+    .pb-safe {
+      padding-bottom: max(0.45rem, env(safe-area-inset-bottom));
+    }
+    .app-scroll::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    .app-scroll::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 9999px;
+    }
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-up {
+      animation: fadeSlideUp 0.2s ease-out forwards;
+    }
+  </style>
+</head>
+<body class="bg-slate-200 sm:bg-slate-900/95 text-slate-900 min-h-[100dvh] flex items-center justify-center sm:p-4">
+
+  <!-- ====================================================================== -->
+  <!-- MOBILE-FIRST PWA CONTAINER (Full layar di HP, Frame max-w-md Desktop)  -->
+  <!-- ====================================================================== -->
+  <div id="app-frame" class="w-full sm:max-w-md h-[100dvh] sm:h-[calc(100dvh-2rem)] sm:max-h-[900px] bg-slate-50 sm:rounded-[28px] sm:shadow-2xl sm:border sm:border-slate-700/60 overflow-hidden flex flex-col relative">
+
+    <!-- Non-blocking Toast Container -->
+    <div id="toast-container" class="absolute top-16 left-4 right-4 z-[80] pointer-events-none flex flex-col gap-2"></div>
+
+    <!-- Main Dynamic Application Root -->
+    <div id="app-root" class="flex-1 flex flex-col min-h-0 overflow-hidden"></div>
+
+    <!-- Modal Overlay -->
+    <div id="modal-root" class="hidden absolute inset-0 z-50 bg-slate-900/60 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-3"></div>
+
+    <!-- Confirmation Dialog Overlay -->
+    <div id="confirm-root" class="hidden absolute inset-0 z-[65] bg-slate-900/65 backdrop-blur-[2px] flex items-center justify-center p-4"></div>
+
+  </div>
+
+  <script>
+  /**
+   * ==========================================================================
+   * LABORATORIUM KOMPUTER (LABKOM) — DUAL-ENGINE LOCAL-FIRST + GOOGLE DRIVE PWA
+   * ==========================================================================
+   * Mode 1: Local Demo Mode (default bila URL Google Apps Script belum diisi)
+   * Mode 2: Cloud Sync Mode (sinkronisasi multi-user + auto-backup Google Drive
+   *         via Google Apps Script Web App menggunakan Content-Type text/plain)
+   */
+  (function () {
+    "use strict";
+
+    // ========================================================================
+    // 1. KONSTANTA & KUNCI PENYIMPANAN (SESUAI KONTRAK ARSITEKTUR)
+    // ========================================================================
+    const GAS_URL_KEY = "https://script.google.com/macros/s/AKfycbwJaDPPxUWRA0ql5rw8Q8tvQPnmmT_9eFEoeZQrDqYoQXCQIP8x2ngq8z24fYK0xVy7/exec";
+    const SESSION_KEY = "labkom_session_v2";
+    const STATE_KEY = "labkom_state_v2";
+    const BACKUP_CFG_KEY = "labkom_backup_cfg_v2";
+    const LOCAL_SNAPSHOT_KEY = "labkom_local_snapshot_v2";
+
+    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+    const ALLOWED_EXT = [".pdf", ".docx", ".xlsx", ".zip", ".rar", ".png", ".jpg", ".jpeg"];
+
+    // Runtime Blob Store untuk file unggahan lokal berukuran besar agar tetap bisa diunduh
+    const runtimeBlobStore = new Map();
+
+    // ========================================================================
+    // 2. STATE GLOBAL APLIKASI
+    // ========================================================================
+    let gasUrl = "";
+    let session = null; // { token, user, mode: 'local' | 'cloud' }
+    let db = null;      // Cached database state
+    let backupCfg = null;
+
+    let ui = {
+      activeTab: "artikel",        // artikel | pengumuman | tugas | kelas | nilai | asisten | profil
+      articleDetailId: null,
+      articleSearch: "",
+      articleSort: "desc",         // desc | asc
+      announcementTab: "global",   // global | asisten
+      selectedKelasId: "",
+      selectedNilaiClassId: "",
+      loginMode: "login",          // login | register
+      showPassword: false,
+      showGasConfigOnLogin: false,
+      isSubmittingAuth: false,
+      isOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
+      syncStatus: "local",         // local | synced | syncing | pending | offline
+      isBackingUp: false,
+      backupProgressText: ""
+    };
+
+    let searchDebounceTimer = null;
+    let autoBackupDebounceTimer = null;
+
+    // ========================================================================
+    // 3. DATA SEED LOKAL REALISTIS (INDONESIA)
+    // ========================================================================
+    function createSeedState() {
+      const now = Date.now();
+      const day = 86400000;
+      const iso = (offsetMs) => new Date(now + offsetMs).toISOString();
+
+      return {
+        classes: [
+          {
+            id: "cls-ifa",
+            name: "IF-A 2026",
+            course_name: "Algoritma & Pemrograman",
+            description: "Senin, 08.00–10.30 WIB • Lab Komputer 1"
+          },
+          {
+            id: "cls-ifb",
+            name: "IF-B 2026",
+            course_name: "Basis Data Lanjut",
+            description: "Rabu, 13.00–15.30 WIB • Lab Komputer 2"
+          }
+        ],
+        users: [
+          {
+            id: "u-admin",
+            username: "admin",
+            password: "123456",
+            full_name: "Dr. Hendra Wijaya",
+            role: "admin",
+            is_asisten: false,
+            created_at: iso(-30 * day)
+          },
+          {
+            id: "u-adminasisten",
+            username: "adminasisten",
+            password: "123456",
+            full_name: "Raka Pratama, M.Kom",
+            role: "admin",
+            is_asisten: true,
+            created_at: iso(-29 * day)
+          },
+          {
+            id: "u-asisten1",
+            username: "asisten1",
+            password: "123456",
+            full_name: "Nadia Putri",
+            role: "asisten",
+            is_asisten: true,
+            created_at: iso(-28 * day)
+          },
+          {
+            id: "u-2401001",
+            username: "2401001",
+            password: "123456",
+            full_name: "Budi Santoso",
+            role: "praktikan",
+            is_asisten: false,
+            created_at: iso(-20 * day)
+          },
+          {
+            id: "u-2401002",
+            username: "2401002",
+            password: "123456",
+            full_name: "Siti Rahmawati",
+            role: "praktikan",
+            is_asisten: false,
+            created_at: iso(-20 * day)
+          },
+          {
+            id: "u-2401003",
+            username: "2401003",
+            password: "123456",
+            full_name: "Dimas Aryo",
+            role: "praktikan",
+            is_asisten: false,
+            created_at: iso(-19 * day)
+          }
+        ],
+        class_assistants: [
+          { id: "ca-1", class_id: "cls-ifa", assistant_id: "u-adminasisten" },
+          { id: "ca-2", class_id: "cls-ifa", assistant_id: "u-asisten1" },
+          { id: "ca-3", class_id: "cls-ifb", assistant_id: "u-asisten1" }
+        ],
+        enrollments: [
+          { id: "en-1", class_id: "cls-ifa", student_id: "u-2401001" },
+          { id: "en-2", class_id: "cls-ifa", student_id: "u-2401002" },
+          { id: "en-3", class_id: "cls-ifb", student_id: "u-2401003" }
+        ],
+        articles: [
+          {
+            id: "art-1",
+            title: "Panduan Lingkungan Kerja VS Code & Python 2026",
+            excerpt: "Konfigurasi interpreter Python, virtual environment, dan ekstensi wajib agar praktikum Algoritma berjalan tanpa kendala.",
+            content: "Selamat datang di Laboratorium Komputer semester ini. Sebelum mengerjakan Modul 1, pastikan seluruh perangkat lunak dasar telah terpasang dengan rapi.\n\n1. Gunakan Python versi 3.11 atau terbaru beserta ekstensi resmi Microsoft Python di VS Code.\n2. Biasakan membuat Virtual Environment (python -m venv .venv) di tiap folder modul agar pustaka tidak saling bentrok.\n3. Simpan berkas tugas menggunakan pola penamaan NIM_Nama_ModulX.pdf atau .zip maksimal 5 MB.\n\nApabila mengalami error saat instalasi, silakan tinggalkan pertanyaan di kolom komentar di bawah ini agar bisa langsung dibantu oleh Asisten kelas Anda.",
+            thumbnail_url: "theme:blue",
+            author_id: "u-asisten1",
+            created_at: iso(-2 * day)
+          },
+          {
+            id: "art-2",
+            title: "Standar Keamanan Data & Tata Tertib Labkom",
+            excerpt: "Prosedur menjaga keamanan akun praktikum, larangan flashdisk tak terpindai, serta alur backup otomatis Google Drive.",
+            content: "Keamanan dan keutuhan data praktikum merupakan tanggung jawab bersama seluruh civitas laboratorium.\n\n• Selalu tekan tombol Logout di menu Profil sebelum meninggalkan komputer lab.\n• Dilarang keras membawa makanan maupun minuman ke dekat meja workstation.\n• Aplikasi Labkom menggunakan arsitektur Local-First dengan pencadangan otomatis ke Google Drive, sehingga data tugas dan rekap tetap aman meski jaringan sempat melambat.\n• Nilai praktikum hanya dapat diakses oleh Asisten pengampu dan Admin Laboratorium demi menjaga objektivitas evaluasi.",
+            thumbnail_url: "theme:slate",
+            author_id: "u-admin",
+            created_at: iso(-5 * day)
+          },
+          {
+            id: "art-3",
+            title: "Optimasi Indeks & Relasi Tabel di Basis Data Lanjut",
+            excerpt: "Cara membaca execution plan, memilih B-Tree Index yang tepat, serta menghindari bottleneck query pada tabel berskala besar.",
+            content: "Dalam kelas Basis Data Lanjut (IF-B 2026), kita tidak hanya berfokus pada desain skema 3NF, melainkan juga performa eksekusi query.\n\nKetika tabel telah melampaui ratusan ribu baris, pencarian tanpa indeks memaksa database engine memindai seluruh halaman disk (Full Table Scan). Dengan menambahkan indeks selektif pada kolom foreign key serta kolom filter tanggal, latensi query dapat turun secara drastis.\n\nPelajari contoh query pada Modul 1 dan diskusikan temuan Anda di kolom komentar!",
+            thumbnail_url: "theme:emerald",
+            author_id: "u-adminasisten",
+            created_at: iso(-1 * day)
+          }
+        ],
+        likes: [
+          { article_id: "art-1", user_id: "u-2401001" },
+          { article_id: "art-1", user_id: "u-2401002" },
+          { article_id: "art-3", user_id: "u-2401001" },
+          { article_id: "art-3", user_id: "u-asisten1" },
+          { article_id: "art-3", user_id: "u-2401003" }
+        ],
+        comments: [
+          {
+            id: "cmt-1",
+            article_id: "art-1",
+            user_id: "u-2401001",
+            content: "Terima kasih Kak Nadia, langkah setup venv-nya jelas banget dan langsung jalan di laptop saya!",
+            created_at: iso(-1.4 * day)
+          },
+          {
+            id: "cmt-2",
+            article_id: "art-1",
+            user_id: "u-adminasisten",
+            content: "Mantap Budi. Jangan lupa aktifkan auto-format sebelum mengumpulkan file Modul 1 ya.",
+            created_at: iso(-1.1 * day)
+          },
+          {
+            id: "cmt-3",
+            article_id: "art-3",
+            user_id: "u-2401003",
+            content: "Pak Raka, apakah studi kasus composite index juga masuk ke penilaian Modul 1 kelas IF-B?",
+            created_at: iso(-0.4 * day)
+          }
+        ],
+        announcements: [
+          {
+            id: "ann-1",
+            title: "Jadwal Ujian Tengah Praktikum (UTP) Semester Genap",
+            content: "Pelaksanaan UTP seluruh kelas Laboratorium Komputer dimulai dua minggu lagi. Pastikan seluruh modul sebelumnya telah dikumpulkan dan hadir 15 menit sebelum sesi dimulai.",
+            scope: "global",
+            class_id: null,
+            author_id: "u-admin",
+            created_at: iso(-3 * day)
+          },
+          {
+            id: "ann-2",
+            title: "Pemeliharaan Rutin Workstation Lab Komputer 1 & 2",
+            content: "Pembaruan sistem operasi dan antivirus akan dilakukan pada hari Sabtu pukul 09.00–12.00 WIB. Portal Labkom tetap dapat diakses normal dari perangkat masing-masing.",
+            scope: "global",
+            class_id: null,
+            author_id: "u-admin",
+            created_at: iso(-6 * day)
+          },
+          {
+            id: "ann-3",
+            title: "Aturan Penamaan Berkas Tugas Kelas IF-A 2026",
+            content: "Halo praktikan IF-A 2026! Mohon gunakan format nama file NIM_Nama_ModulX.pdf atau .zip saat mengunggah tugas agar proses pemeriksaan berjalan lebih cepat.",
+            scope: "asisten",
+            class_id: "cls-ifa",
+            author_id: "u-adminasisten",
+            created_at: iso(-1.8 * day)
+          }
+        ],
+        assignments: [
+          {
+            id: "asg-1",
+            class_id: "cls-ifa",
+            title: "Modul 1: Percabangan & Perulangan Dasar",
+            description: "Selesaikan 3 soal studi kasus percabangan bertingkat dan nested loop sesuai berkas soal. Unggah laporan singkat (.pdf) atau arsip kode (.zip) maksimal 5 MB.",
+            file_id: "local-mat-asg-1",
+            file_name: "Modul_01_Percabangan_Loop.pdf",
+            file_content: "LABORATORIUM KOMPUTER - IF-A 2026\nMODUL 1: PERCABANGAN & PERULANGAN\n\n1. Buat kalkulator grade otomatis.\n2. Buat pola segitiga pascal menggunakan nested loop.\n3. Sertakan tangkapan layar hasil eksekusi program.",
+            release_at: iso(-6 * day),
+            due_at: iso(3 * day),
+            created_by: "u-admin",
+            created_at: iso(-6 * day)
+          },
+          {
+            id: "asg-2",
+            class_id: "cls-ifa",
+            title: "Modul 2: Fungsi Rekursif & Struktur Array",
+            description: "Implementasikan algoritma Fibonacci dengan memoization serta operasi perkalian matriks 2 dimensi. Pastikan kode terstruktur dan diberi komentar.",
+            file_id: "local-mat-asg-2",
+            file_name: "Modul_02_Rekursif_Array.docx",
+            file_content: "LABORATORIUM KOMPUTER - IF-A 2026\nMODUL 2: REKURSIF & ARRAY\n\n1. Bandingkan kompleksitas rekursif biasa vs memoization.\n2. Implementasikan transpose dan perkalian matriks.",
+            release_at: iso(-2 * day),
+            due_at: iso(6 * day),
+            created_by: "u-admin",
+            created_at: iso(-2 * day)
+          },
+          {
+            id: "asg-3",
+            class_id: "cls-ifa",
+            title: "Modul 3: Pemrograman Berorientasi Objek (Terjadwal)",
+            description: "Tugas ini dijadwalkan rilis otomatis 7 hari dari sekarang. Akun Praktikan tidak akan melihat tugas ini sebelum jadwal rilis tiba.",
+            file_id: "local-mat-asg-3",
+            file_name: "Modul_03_OOP_Python.pdf",
+            file_content: "LABORATORIUM KOMPUTER - IF-A 2026\nMODUL 3: OOP (TERJADWAL)\nTopik: Class, Inheritance, Polymorphism.",
+            release_at: iso(7 * day), // 7 hari ke depan -> tersembunyi dari Praktikan
+            due_at: iso(14 * day),
+            created_by: "u-admin",
+            created_at: iso(-1 * day)
+          },
+          {
+            id: "asg-4",
+            class_id: "cls-ifb",
+            title: "Modul 1: Normalisasi 1NF–3NF & Diagram ERD",
+            description: "Lakukan normalisasi dokumen faktur transaksi ke bentuk 3NF lengkap dengan kardinalitas dan relasi antar entitas.",
+            file_id: "local-mat-asg-4",
+            file_name: "Modul_01_Normalisasi_ERD.pdf",
+            file_content: "LABORATORIUM KOMPUTER - IF-B 2026\nMODUL 1: NORMALISASI & ERD\nSusun skema 1NF, 2NF, 3NF, dan relasi tabel.",
+            release_at: iso(-4 * day),
+            due_at: iso(4 * day),
+            created_by: "u-admin",
+            created_at: iso(-4 * day)
+          }
+        ],
+        submissions: [
+          {
+            id: "sub-1",
+            assignment_id: "asg-1",
+            student_id: "u-2401001",
+            file_id: "local-sub-1",
+            file_name: "2401001_Budi_Modul1.pdf",
+            file_size: 412800,
+            file_content: "LAPORAN PRAKTIKUM MODUL 1\nNama: Budi Santoso\nNIM: 2401001\nKelas: IF-A 2026\nHasil: Semua test case percabangan & loop lulus.",
+            submitted_at: iso(-3 * day)
+          },
+          {
+            id: "sub-2",
+            assignment_id: "asg-1",
+            student_id: "u-2401002",
+            file_id: "local-sub-2",
+            file_name: "2401002_Siti_Modul1.zip",
+            file_size: 528900,
+            file_content: "ARSIP TUGAS MODUL 1\nNama: Siti Rahmawati\nNIM: 2401002\nKelas: IF-A 2026",
+            submitted_at: iso(-2.6 * day)
+          },
+          {
+            id: "sub-3",
+            assignment_id: "asg-2",
+            student_id: "u-2401002",
+            file_id: "local-sub-3",
+            file_name: "2401002_Siti_Modul2.pdf",
+            file_size: 384200,
+            file_content: "LAPORAN MODUL 2 REKURSIF & ARRAY\nNama: Siti Rahmawati (2401002)",
+            submitted_at: iso(-0.8 * day)
+          },
+          {
+            id: "sub-4",
+            assignment_id: "asg-4",
+            student_id: "u-2401003",
+            file_id: "local-sub-4",
+            file_name: "2401003_Dimas_ERD.pdf",
+            file_size: 492100,
+            file_content: "LAPORAN NORMALISASI 3NF & ERD\nNama: Dimas Aryo (2401003)\nKelas: IF-B 2026",
+            submitted_at: iso(-1.2 * day)
+          }
+        ],
+        grades: [
+          {
+            id: "grd-1",
+            submission_id: "sub-1",
+            assignment_id: "asg-1",
+            student_id: "u-2401001",
+            class_id: "cls-ifa",
+            score: 90,
+            feedback: "Algoritma rapi dan efisien.",
+            updated_at: iso(-2 * day)
+          },
+          {
+            id: "grd-2",
+            submission_id: "sub-2",
+            assignment_id: "asg-1",
+            student_id: "u-2401002",
+            class_id: "cls-ifa",
+            score: 95,
+            feedback: "Sangat lengkap dengan analisis kompleksitas.",
+            updated_at: iso(-2 * day)
+          },
+          {
+            id: "grd-3",
+            submission_id: "sub-4",
+            assignment_id: "asg-4",
+            student_id: "u-2401003",
+            class_id: "cls-ifb",
+            score: 88,
+            feedback: "Relasi 3NF sudah tepat.",
+            updated_at: iso(-0.9 * day)
+          }
+        ]
+      };
+    }
+
+    function createDefaultBackupCfg() {
+      return {
+        frequency: "realtime", // realtime | daily | weekly | manual
+        lastLocalBackupAt: new Date().toISOString(),
+        lastCloudBackupAt: null,
+        lastBackupSizeBytes: 0,
+        lastBackupFileName: "labkom_backup.json",
+        backupCount: 0
+      };
+    }
+
+    // ========================================================================
+    // 4. PERSISTENSI LOCALSTORAGE & PENJAGAAN SESI (ANTI RANDOM LOGOUT)
+    // ========================================================================
+    function loadAllFromStorage() {
+      try {
+        gasUrl = (localStorage.getItem(GAS_URL_KEY) || "").trim();
+      } catch {
+        gasUrl = "";
+      }
+
+      try {
+        const rawState = localStorage.getItem(STATE_KEY);
+        db = rawState ? JSON.parse(rawState) : createSeedState();
+        if (!rawState) persistState(false);
+      } catch {
+        db = createSeedState();
+        persistState(false);
+      }
+
+      try {
+        const rawCfg = localStorage.getItem(BACKUP_CFG_KEY);
+        backupCfg = rawCfg ? Object.assign(createDefaultBackupCfg(), JSON.parse(rawCfg)) : createDefaultBackupCfg();
+      } catch {
+        backupCfg = createDefaultBackupCfg();
+      }
+      backupCfg.lastBackupSizeBytes = getSerializedStateSize();
+      persistBackupCfg();
+
+      try {
+        const rawSess = localStorage.getItem(SESSION_KEY);
+        if (rawSess) {
+          const parsed = JSON.parse(rawSess);
+          if (parsed && parsed.user && parsed.user.id) {
+            session = parsed;
+            // Pastikan user objek sinkron dengan cache lokal bila mode lokal
+            if (session.mode === "local") {
+              const latest = db.users.find((u) => u.id === session.user.id);
+              if (latest) session.user = sanitizeUserObj(latest);
+            }
+          }
+        }
+      } catch {
+        session = null;
+      }
+
+      updateSyncIndicator();
+    }
+
+    function getSerializedStateSize() {
+      try {
+        const str = JSON.stringify(db || {});
+        return new Blob([str]).size;
+      } catch {
+        return 0;
+      }
+    }
+
+    function persistState(triggerAutoBackup = true) {
+      try {
+        const serialized = JSON.stringify(db);
+        localStorage.setItem(STATE_KEY, serialized);
+        if (backupCfg) {
+          backupCfg.lastLocalBackupAt = new Date().toISOString();
+          backupCfg.lastBackupSizeBytes = new Blob([serialized]).size;
+          persistBackupCfg();
+        }
+        if (triggerAutoBackup) {
+          scheduleRealtimeAutoBackup("auto_mutation");
+        }
+      } catch {
+        showToast("Penyimpanan lokal penuh. Hapus sebagian file besar atau ekspor cadangan.", "error");
+      }
+    }
+
+    function persistSession(newSession) {
+      session = newSession;
+      try {
+        if (newSession) {
+          localStorage.setItem(SESSION_KEY, JSON.stringify(newSession));
+        } else {
+          localStorage.removeItem(SESSION_KEY);
+        }
+      } catch {
+        // ignore storage quota errors on session write
+      }
+    }
+
+    function persistBackupCfg() {
+      try {
+        localStorage.setItem(BACKUP_CFG_KEY, JSON.stringify(backupCfg));
+      } catch {}
+    }
+
+    function persistGasUrl(url) {
+      gasUrl = (url || "").trim();
+      try {
+        if (gasUrl) localStorage.setItem(GAS_URL_KEY, gasUrl);
+        else localStorage.removeItem(GAS_URL_KEY);
+      } catch {}
+      updateSyncIndicator();
+    }
+
+    function isCloudConfigured() {
+      return Boolean(gasUrl && /^https?:\/\//i.test(gasUrl));
+    }
+
+    function isCloudSession() {
+      return Boolean(isCloudConfigured() && session && session.mode === "cloud");
+    }
+
+    function updateSyncIndicator(customStatus) {
+      if (customStatus) {
+        ui.syncStatus = customStatus;
+        return;
+      }
+      if (ui.isOffline) {
+        ui.syncStatus = isCloudConfigured() ? "offline" : "local";
+      } else if (isCloudConfigured()) {
+        ui.syncStatus = isCloudSession() ? "synced" : "pending";
+      } else {
+        ui.syncStatus = "local";
+      }
+    }
+
+    // ========================================================================
+    // 5. DUAL-ENGINE API CLIENT (GOOGLE APPS SCRIPT + LOCAL FALLBACK)
+    // ========================================================================
+    async function callGas(action, payload = {}, overrideUrl = null) {
+      const targetUrl = (overrideUrl || gasUrl || "").trim();
+      if (!targetUrl) {
+        return { ok: false, error: "URL Google Apps Script belum diatur.", isNetworkError: false };
+      }
+      if (!navigator.onLine) {
+        ui.isOffline = true;
+        updateSyncIndicator("offline");
+        return { ok: false, error: "Koneksi internet terputus. Perubahan tetap aman di penyimpanan lokal.", isNetworkError: true };
+      }
+
+      try {
+        const res = await fetch(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({
+            action,
+            token: session?.token || "",
+            payload: payload || {}
+          })
+        });
+
+        const text = await res.text();
+        let json;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          return {
+            ok: false,
+            error: "Respons server Google Apps Script tidak valid (pastikan Web App di-deploy untuk 'Anyone').",
+            isNetworkError: false
+          };
+        }
+
+        if (typeof json.ok !== "boolean") {
+          return { ok: false, error: "Format respons API tidak dikenali.", isNetworkError: false };
+        }
+        return json;
+      } catch (err) {
+        return {
+          ok: false,
+          error: "Gagal terhubung ke server Google Drive (Apps Script). Periksa URL atau jaringan internet Anda.",
+          isNetworkError: true
+        };
+      }
+    }
+
+    /**
+     * Sinkronisasi data terbaru dari Google Drive (Cloud Mode)
+     * Tidak pernah me-logout pengguna ketika jaringan bermasalah!
+     */
+    async function syncFromCloud(silent = true) {
+      if (!isCloudSession()) return false;
+      if (!navigator.onLine) {
+        ui.isOffline = true;
+        updateSyncIndicator("offline");
+        return false;
+      }
+
+      updateSyncIndicator("syncing");
+      renderSyncDotOnly();
+
+      const res = await callGas("sync", {});
+      if (res.ok && res.data) {
+        mergeCloudState(res.data);
+        updateSyncIndicator("synced");
+        if (!silent) showToast("Data berhasil disinkronkan dari Google Drive.", "success");
+        render();
+        return true;
+      } else {
+        updateSyncIndicator(res.isNetworkError ? "offline" : "pending");
+        renderSyncDotOnly();
+        if (!silent && res.error) showToast(res.error, "error");
+        return false;
+      }
+    }
+
+    function mergeCloudState(cloudData) {
+      const keys = ["classes", "users", "class_assistants", "enrollments", "articles", "likes", "comments", "announcements", "assignments", "submissions", "grades"];
+      keys.forEach((k) => {
+        if (Array.isArray(cloudData[k])) {
+          db[k] = cloudData[k];
+        }
+      });
+      // Keamanan mutlak: pastikan praktikan tidak pernah menyimpan array grades di state lokal
+      if (session?.user?.role === "praktikan") {
+        db.grades = [];
+      }
+      if (cloudData.user && session) {
+        session.user = sanitizeUserObj(cloudData.user);
+        persistSession(session);
+      }
+      if (cloudData.backupInfo) {
+        if (cloudData.backupInfo.lastCloudBackupAt) backupCfg.lastCloudBackupAt = cloudData.backupInfo.lastCloudBackupAt;
+        if (cloudData.backupInfo.lastBackupFileName) backupCfg.lastBackupFileName = cloudData.backupInfo.lastBackupFileName;
+        if (typeof cloudData.backupInfo.backupCount === "number") backupCfg.backupCount = cloudData.backupInfo.backupCount;
+        persistBackupCfg();
+      }
+      persistState(false);
+    }
+
+    // ========================================================================
+    // 6. AUTO-BACKUP ENGINE ALA WHATSAPP (REALTIME / DAILY / WEEKLY / MANUAL)
+    // ========================================================================
+    function scheduleRealtimeAutoBackup(reason = "realtime") {
+      if (!backupCfg || backupCfg.frequency !== "realtime") return;
+      clearTimeout(autoBackupDebounceTimer);
+      autoBackupDebounceTimer = setTimeout(() => {
+        performBackup({ reason, silent: true });
+      }, 4000);
+    }
+
+    function checkScheduledBackupOnStartup() {
+      if (!backupCfg || !session) return;
+      const freq = backupCfg.frequency;
+      if (freq !== "daily" && freq !== "weekly") return;
+
+      const lastIso = isCloudSession() ? backupCfg.lastCloudBackupAt : backupCfg.lastLocalBackupAt;
+      const intervalMs = freq === "daily" ? 24 * 3600 * 1000 : 7 * 24 * 3600 * 1000;
+      const elapsed = lastIso ? Date.now() - new Date(lastIso).getTime() : Infinity;
+
+      if (elapsed >= intervalMs) {
+        performBackup({ reason: `scheduled_${freq}`, silent: true });
+      }
+    }
+
+    async function performBackup({ reason = "manual", silent = false } = {}) {
+      if (ui.isBackingUp) return;
+      ui.isBackingUp = true;
+      ui.backupProgressText = isCloudSession() ? "Mengunggah snapshot ke Google Drive..." : "Menyimpan snapshot lokal...";
+      if (ui.activeTab === "profil") render();
+
+      const nowIso = new Date().toISOString();
+      const snapshotPayload = {
+        app: "Laboratorium Komputer (Labkom)",
+        version: 2,
+        backedUpAt: nowIso,
+        reason,
+        state: db
+      };
+      const serialized = JSON.stringify(snapshotPayload);
+      const sizeBytes = new Blob([serialized]).size;
+
+      // Selalu simpan snapshot lokal terlebih dahulu (Local-First)
+      try {
+        localStorage.setItem(LOCAL_SNAPSHOT_KEY, serialized);
+      } catch {}
+
+      backupCfg.lastLocalBackupAt = nowIso;
+      backupCfg.lastBackupSizeBytes = sizeBytes;
+
+      if (isCloudSession() && navigator.onLine) {
+        const res = await callGas("backupNow", { reason });
+        if (res.ok) {
+          backupCfg.lastCloudBackupAt = res.data?.backedUpAt || nowIso;
+          backupCfg.lastBackupFileName = res.data?.fileName || "labkom_backup.json";
+          backupCfg.lastBackupSizeBytes = res.data?.sizeBytes || sizeBytes;
+          backupCfg.backupCount = (backupCfg.backupCount || 0) + 1;
+          updateSyncIndicator("synced");
+          if (!silent) showToast("Cadangan berhasil disimpan ke Google Drive!", "success");
+        } else {
+          updateSyncIndicator(res.isNetworkError ? "offline" : "pending");
+          if (!silent) showToast(res.error || "Cadangan lokal tersimpan, tetapi gagal unggah ke Drive.", "error");
+        }
+      } else {
+        backupCfg.backupCount = (backupCfg.backupCount || 0) + 1;
+        backupCfg.lastBackupFileName = "labkom_local_snapshot.json";
+        if (!silent) {
+          showToast(
+            isCloudConfigured()
+              ? "Offline: cadangan tersimpan di perangkat, menunggu jaringan ke Google Drive."
+              : "Snapshot lokal berhasil dicadangkan!",
+            "success"
+          );
+        }
+      }
+
+      persistBackupCfg();
+      ui.isBackingUp = false;
+      ui.backupProgressText = "";
+      if (ui.activeTab === "profil") render();
+      else renderSyncDotOnly();
+    }
+
+    async function performRestoreFromDrive() {
+      if (isCloudSession()) {
+        if (!navigator.onLine) {
+          showToast("Tidak dapat memulihkan dari Google Drive saat offline.", "error");
+          return;
+        }
+        showToast("Mengambil cadangan terbaru dari Google Drive...", "info");
+        const res = await callGas("restoreBackup", { restoreSnapshot: true });
+        if (res.ok && res.data) {
+          const stateData = res.data.state || res.data;
+          mergeCloudState(stateData);
+          showToast("Data berhasil dipulihkan dari Google Drive!", "success");
+          render();
+          return;
+        }
+        showToast(res.error || "Gagal memulihkan cadangan dari Google Drive.", "error");
+        return;
+      }
+
+      // Mode Lokal: pulihkan dari snapshot lokal terakhir
+      try {
+        const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
+        if (!raw) {
+          showToast("Belum ada snapshot lokal. Tekan 'Cadangkan Sekarang' terlebih dahulu.", "info");
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.state) {
+          db = parsed.state;
+          persistState(false);
+          showToast("Data lokal berhasil dipulihkan dari snapshot terakhir!", "success");
+          render();
+        }
+      } catch {
+        showToast("Snapshot cadangan lokal rusak atau tidak terbaca.", "error");
+      }
+    }
+
+    // ========================================================================
+    // 7. HELPER OTORISASI, FORMAT & KEAMANAN
+    // ========================================================================
+    function sanitizeUserObj(u) {
+      if (!u) return null;
+      return {
+        id: u.id,
+        username: u.username,
+        full_name: u.full_name,
+        role: u.role,
+        is_asisten: Boolean(u.is_asisten),
+        created_at: u.created_at
+      };
+    }
+
+    function currentUser() {
+      if (!session || !session.user) return null;
+      if (session.mode === "local") {
+        const latest = db.users.find((u) => u.id === session.user.id);
+        if (latest) return latest;
+      }
+      return session.user;
+    }
+
+    function isAdmin(u = currentUser()) {
+      return Boolean(u && u.role === "admin");
+    }
+
+    function isDualRoleAdmin(u = currentUser()) {
+      return Boolean(u && u.role === "admin" && u.is_asisten === true);
+    }
+
+    function canTeach(u = currentUser()) {
+      return Boolean(u && (u.role === "asisten" || (u.role === "admin" && u.is_asisten === true)));
+    }
+
+    function getTaughtClasses(userId) {
+      const ids = db.class_assistants.filter((ca) => ca.assistant_id === userId).map((ca) => ca.class_id);
+      return db.classes.filter((c) => ids.includes(c.id));
+    }
+
+    function getEnrolledClasses(userId) {
+      const ids = db.enrollments.filter((en) => en.student_id === userId).map((en) => en.class_id);
+      return db.classes.filter((c) => ids.includes(c.id));
+    }
+
+    function getUserClassLabel(u) {
+      if (!u) return "-";
+      if (u.role === "praktikan") {
+        const list = getEnrolledClasses(u.id).map((c) => c.name);
+        return list.length ? list.join(", ") : "Belum ada kelas";
+      }
+      const taught = getTaughtClasses(u.id).map((c) => c.name);
+      if (taught.length) return "Pengampu " + taught.join(", ");
+      return u.role === "admin" ? "Administrator Lab" : "Belum ditugaskan";
+    }
+
+    function getRoleLabel(u) {
+      if (!u) return "";
+      if (u.role === "admin") return u.is_asisten ? "Admin + Asisten" : "Admin";
+      if (u.role === "asisten") return "Asisten";
+      return "Praktikan";
+    }
+
+    function uid(prefix) {
+      return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    }
+
+    function esc(str) {
+      return String(str ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatDate(isoStr, withTime = false) {
+      if (!isoStr) return "-";
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return "-";
+      return withTime
+        ? d.toLocaleString("id-ID", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+        : d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes <= 0) return "0 KB";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function validateFile(file) {
+      if (!file) return "Pilih file terlebih dahulu.";
+      if (file.size > MAX_FILE_SIZE) {
+        return `Ukuran file terlalu besar (${(file.size / 1024 / 1024).toFixed(2)} MB). Maksimal 5 MB.`;
+      }
+      const lower = file.name.toLowerCase();
+      if (!ALLOWED_EXT.some((ext) => lower.endsWith(ext))) {
+        return `Format file tidak diizinkan. Gunakan: ${ALLOWED_EXT.join(", ")}`;
+      }
+      return null;
+    }
+
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const idx = result.indexOf(",");
+          resolve(idx >= 0 ? result.slice(idx + 1) : result);
+        };
+        reader.onerror = () => reject(new Error("Gagal membaca file dari perangkat."));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function base64ToBlob(base64, mime = "application/octet-stream") {
+      const binary = atob(base64);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      return new Blob([bytes], { type: mime });
+    }
+
+    function triggerBlobDownload(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "dokumen_labkom.bin";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+    }
+
+    async function handleFileDownload({ fileId, kind, fileName, fallbackContent, localBase64, localMime }) {
+      // Cloud mode -> unduh via GAS downloadFile
+      if (isCloudSession() && fileId && !String(fileId).startsWith("local-")) {
+        showToast(`Mengunduh ${fileName || "berkas"} dari Google Drive...`, "info");
+        const res = await callGas("downloadFile", { file_id: fileId, kind });
+        if (res.ok && res.data) {
+          if (res.data.file_base64) {
+            const blob = base64ToBlob(res.data.file_base64, res.data.file_mime || "application/octet-stream");
+            triggerBlobDownload(blob, res.data.file_name || fileName);
+            showToast(`Berhasil mengunduh ${res.data.file_name || fileName}`, "success");
+            return;
+          }
+          if (res.data.downloadUrl) {
+            window.open(res.data.downloadUrl, "_blank");
+            return;
+          }
+        }
+        showToast(res.error || "Gagal mengunduh file dari Google Drive.", "error");
+        return;
+      }
+
+      // Local mode -> cek runtimeBlobStore, lalu localBase64, lalu teks demo
+      let blob = runtimeBlobStore.get(fileId);
+      if (!blob && localBase64) {
+        try {
+          blob = base64ToBlob(localBase64, localMime || "application/octet-stream");
+        } catch {}
+      }
+      if (!blob) {
+        blob = new Blob([fallbackContent || `Dokumen Laboratorium Komputer: ${fileName}`], {
+          type: "text/plain;charset=utf-8"
+        });
+      }
+      triggerBlobDownload(blob, fileName || "dokumen_labkom.txt");
+      showToast(`Mengunduh ${fileName}...`, "success");
+    }
+
+    function copyTextSafe(text) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+      }
+      document.body.removeChild(ta);
+    }
+
+    // ========================================================================
+    // 8. TOAST, MODAL & KONFIRMASI (TANPA alert() / confirm())
+    // ========================================================================
+    function showToast(message, type = "info") {
+      const container = document.getElementById("toast-container");
+      const styles = {
+        success: "bg-emerald-600 text-white",
+        error: "bg-rose-600 text-white",
+        info: "bg-slate-900 text-white"
+      };
+      const el = document.createElement("div");
+      el.className = `${styles[type] || styles.info} px-3.5 py-2.5 rounded-xl shadow-lg text-xs font-medium flex items-center gap-2 animate-fade-up pointer-events-auto`;
+      el.innerHTML = `<span class="flex-1 leading-snug">${esc(message)}</span>`;
+      container.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = "0";
+        el.style.transition = "opacity 0.25s";
+        setTimeout(() => el.remove(), 260);
+      }, 3000);
+    }
+
+    function openModal(title, bodyHtml) {
+      const root = document.getElementById("modal-root");
+      root.innerHTML = `
+        <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-fade-up max-h-[86dvh] flex flex-col">
+          <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between shrink-0">
+            <h3 class="font-bold text-sm text-slate-900">${esc(title)}</h3>
+            <button type="button" data-close-modal class="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="Tutup">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+          <div class="p-5 overflow-y-auto app-scroll flex-1">${bodyHtml}</div>
+        </div>
+      `;
+      root.classList.remove("hidden");
+      root.onclick = (e) => {
+        if (e.target === root || e.target.closest("[data-close-modal]")) closeModal();
+      };
+      lucide.createIcons();
+    }
+
+    function closeModal() {
+      const root = document.getElementById("modal-root");
+      root.classList.add("hidden");
+      root.innerHTML = "";
+    }
+
+    function openConfirm({ title, message, confirmLabel = "Ya, Lanjutkan", danger = true, onConfirm }) {
+      const root = document.getElementById("confirm-root");
+      root.innerHTML = `
+        <div class="bg-white w-full max-w-xs rounded-2xl p-5 shadow-2xl animate-fade-up">
+          <h3 class="font-bold text-base text-slate-900">${esc(title)}</h3>
+          <p class="text-xs text-slate-600 mt-1.5 leading-relaxed">${esc(message)}</p>
+          <div class="mt-4 flex gap-2">
+            <button type="button" id="confirm-cancel" class="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              Batal
+            </button>
+            <button type="button" id="confirm-ok" class="flex-1 py-2.5 rounded-xl ${danger ? "bg-rose-600 hover:bg-rose-700" : "bg-emerald-600 hover:bg-emerald-700"} text-white text-xs font-semibold">
+              ${esc(confirmLabel)}
+            </button>
+          </div>
+        </div>
+      `;
+      root.classList.remove("hidden");
+      document.getElementById("confirm-cancel").onclick = () => root.classList.add("hidden");
+      document.getElementById("confirm-ok").onclick = () => {
+        root.classList.add("hidden");
+        if (typeof onConfirm === "function") onConfirm();
+      };
+    }
+
+    // Banner SVG Offline-Safe untuk Artikel (atau URL gambar eksternal valid)
+    function renderArticleThumb(article, tall = false) {
+      const thumb = article.thumbnail_url || "theme:blue";
+      if (/^https?:\/\//i.test(thumb)) {
+        return `<img src="${esc(thumb)}" alt="${esc(article.title)}" onerror="this.style.display='none'" class="w-full ${tall ? "h-48" : "h-36"} object-cover bg-slate-100" />`;
+      }
+      const themeKey = thumb.replace("theme:", "");
+      const palettes = {
+        blue: { g1: "#1d4ed8", g2: "#0ea5e9", accent: "#93c5fd", tag: "MODUL & PANDUAN" },
+        slate: { g1: "#0f172a", g2: "#334155", accent: "#38bdf8", tag: "KEAMANAN LABKOM" },
+        emerald: { g1: "#047857", g2: "#10b981", accent: "#a7f3d0", tag: "BASIS DATA & SISTEM" },
+        indigo: { g1: "#4338ca", g2: "#6366f1", accent: "#c7d2fe", tag: "INFO PRAKTIKUM" }
+      };
+      const p = palettes[themeKey] || palettes.blue;
+      const gid = "grad-" + String(article.id).replace(/[^a-z0-9]/gi, "");
+      return `
+        <div class="w-full ${tall ? "h-44" : "h-32"} relative overflow-hidden">
+          <svg viewBox="0 0 480 180" preserveAspectRatio="xMidYMid slice" class="w-full h-full block">
+            <defs>
+              <linearGradient id="${gid}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="${p.g1}" />
+                <stop offset="100%" stop-color="${p.g2}" />
+              </linearGradient>
+            </defs>
+            <rect width="480" height="180" fill="url(#${gid})" />
+            <circle cx="425" cy="28" r="88" fill="${p.accent}" fill-opacity="0.16" />
+            <circle cx="60" cy="165" r="72" fill="#ffffff" fill-opacity="0.09" />
+            <rect x="26" y="26" width="142" height="24" rx="12" fill="#ffffff" fill-opacity="0.18" />
+            <text x="40" y="42" fill="#ffffff" font-family="Inter, sans-serif" font-size="10" font-weight="700" letter-spacing="0.8">${p.tag}</text>
+            <rect x="330" y="96" width="118" height="58" rx="10" fill="#0f172a" fill-opacity="0.28" stroke="#ffffff" stroke-opacity="0.22" />
+            <circle cx="345" cy="110" r="3" fill="#f87171" />
+            <circle cx="355" cy="110" r="3" fill="#fbbf24" />
+            <circle cx="365" cy="110" r="3" fill="#34d399" />
+            <rect x="342" y="123" width="68" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.55" />
+            <rect x="342" y="134" width="48" height="5" rx="2.5" fill="${p.accent}" fill-opacity="0.85" />
+          </svg>
+        </div>
+      `;
+    }
+
+    // ========================================================================
+    // 9. CLIENT-SIDE EXPORT ENGINE (.XLSX, .DOCX, .PDF)
+    // ========================================================================
+    function buildGradeMatrix(classId) {
+      const cls = db.classes.find((c) => c.id === classId);
+      const enrolledIds = db.enrollments.filter((e) => e.class_id === classId).map((e) => e.student_id);
+      const students = db.users
+        .filter((u) => enrolledIds.includes(u.id))
+        .sort((a, b) => a.username.localeCompare(b.username));
+      const assignments = db.assignments
+        .filter((a) => a.class_id === classId)
+        .sort((a, b) => new Date(a.release_at) - new Date(b.release_at));
+
+      const rows = students.map((st, idx) => {
+        const scores = {};
+        const valid = [];
+        assignments.forEach((asg) => {
+          const g = db.grades.find(
+            (gr) => gr.class_id === classId && gr.student_id === st.id && gr.assignment_id === asg.id
+          );
+          if (g !== undefined) {
+            scores[asg.id] = Number(g.score);
+            valid.push(Number(g.score));
+          } else {
+            scores[asg.id] = null;
+          }
+        });
+        const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
+        return {
+          no: idx + 1,
+          nim: st.username,
+          fullName: st.full_name,
+          scores,
+          average: avg
+        };
+      });
+
+      return {
+        className: cls ? cls.name : "Kelas",
+        courseName: cls ? cls.course_name : "",
+        assignments,
+        rows
+      };
+    }
+
+    function exportExcel(matrix) {
+      try {
+        if (typeof XLSX === "undefined") {
+          showToast("Library Excel (SheetJS) belum termuat.", "error");
+          return;
+        }
+        const headers = ["No", "NIM / ID", "Nama Praktikan", ...matrix.assignments.map((a) => a.title), "Rata-rata"];
+        const body = matrix.rows.map((r) => [
+          r.no,
+          r.nim,
+          r.fullName,
+          ...matrix.assignments.map((a) => (r.scores[a.id] !== null ? r.scores[a.id] : "-")),
+          r.average !== null ? Number(r.average.toFixed(1)) : "-"
+        ]);
+        const ws = XLSX.utils.aoa_to_sheet([
+          ["REKAPITULASI NILAI LABORATORIUM KOMPUTER (LABKOM)"],
+          [`Kelas: ${matrix.className} (${matrix.courseName})`, "", `Jumlah Praktikan: ${matrix.rows.length}`],
+          [],
+          headers,
+          ...body
+        ]);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Rekap Nilai");
+        const slug = matrix.className.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        XLSX.writeFile(wb, `Rekap_Nilai_${slug}.xlsx`);
+        showToast("Laporan Excel (.xlsx) berhasil diunduh!", "success");
+      } catch (err) {
+        showToast("Gagal mengekspor Excel: " + err.message, "error");
+      }
+    }
+
+    async function exportWord(matrix) {
+      const slug = matrix.className.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      const headers = ["No", "NIM / ID", "Nama Praktikan", ...matrix.assignments.map((a) => a.title), "Rata-rata"];
+      const body = matrix.rows.map((r) => [
+        String(r.no),
+        r.nim,
+        r.fullName,
+        ...matrix.assignments.map((a) => (r.scores[a.id] !== null ? String(r.scores[a.id]) : "-")),
+        r.average !== null ? r.average.toFixed(1) : "-"
+      ]);
+
+      try {
+        if (window.docx && window.docx.Document && window.docx.Packer) {
+          const { Document, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType, AlignmentType } = window.docx;
+          const headerRow = new TableRow({
+            tableHeader: true,
+            children: headers.map(
+              (h) =>
+                new TableCell({
+                  shading: { fill: "0F172A" },
+                  children: [
+                    new Paragraph({
+                      alignment: AlignmentType.CENTER,
+                      children: [new TextRun({ text: h, bold: true, color: "FFFFFF", size: 18 })]
+                    })
+                  ]
+                })
+            )
+          });
+          const dataRows = body.map(
+            (row) =>
+              new TableRow({
+                children: row.map(
+                  (val, idx) =>
+                    new TableCell({
+                      children: [
+                        new Paragraph({
+                          alignment: idx === 2 ? AlignmentType.LEFT : AlignmentType.CENTER,
+                          children: [new TextRun({ text: val, size: 18 })]
+                        })
+                      ]
+                    })
+                )
+              })
+          );
+          const doc = new Document({
+            sections: [
+              {
+                children: [
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    children: [new TextRun({ text: "LAPORAN REKAPITULASI NILAI PRAKTIKUM", bold: true, size: 28 })]
+                  }),
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { after: 260 },
+                    children: [
+                      new TextRun({
+                        text: `Laboratorium Komputer • Kelas: ${matrix.className} (${matrix.courseName}) • Total: ${matrix.rows.length} Praktikan`,
+                        size: 20,
+                        color: "475569"
+                      })
+                    ]
+                  }),
+                  new Table({
+                    width: { size: 100, type: WidthType.PERCENTAGE },
+                    rows: [headerRow, ...dataRows]
+                  })
+                ]
+              }
+            ]
+          });
+          const blob = await Packer.toBlob(doc);
+          triggerBlobDownload(blob, `Rekap_Nilai_${slug}.docx`);
+          showToast("Laporan Word (.docx) berhasil diunduh!", "success");
+          return;
+        }
+      } catch {}
+
+      // Fallback Word-compatible document
+      const htmlDoc = `
+        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+        <head><meta charset='utf-8'><title>Rekap Nilai Labkom</title>
+        <style>body{font-family:Calibri,Arial,sans-serif;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #334155;padding:6px;font-size:11pt;}th{background:#0f172a;color:#fff;}</style>
+        </head><body>
+        <h2 style="text-align:center;">LAPORAN REKAPITULASI NILAI LABORATORIUM KOMPUTER</h2>
+        <p style="text-align:center;">Kelas: ${esc(matrix.className)} (${esc(matrix.courseName)}) | Total Praktikan: ${matrix.rows.length}</p>
+        <table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
+        <tbody>${body.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>
+        </body></html>`;
+      const blob = new Blob(["\ufeff", htmlDoc], { type: "application/msword" });
+      triggerBlobDownload(blob, `Rekap_Nilai_${slug}.docx`);
+      showToast("Laporan Word (.docx) berhasil diunduh!", "success");
+    }
+
+    function exportPdf(matrix) {
+      try {
+        if (!window.jspdf || !window.jspdf.jsPDF) {
+          showToast("Library PDF (jsPDF) belum termuat.", "error");
+          return;
+        }
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+        const headers = ["No", "NIM / ID", "Nama Praktikan", ...matrix.assignments.map((a) => a.title), "Rata-rata"];
+        const body = matrix.rows.map((r) => [
+          String(r.no),
+          r.nim,
+          r.fullName,
+          ...matrix.assignments.map((a) => (r.scores[a.id] !== null ? String(r.scores[a.id]) : "-")),
+          r.average !== null ? r.average.toFixed(1) : "-"
+        ]);
+
+        doc.setFontSize(14);
+        doc.text("REKAPITULASI NILAI LABORATORIUM KOMPUTER (LABKOM)", 14, 15);
+        doc.setFontSize(10);
+        doc.setTextColor(71, 85, 105);
+        doc.text(
+          `Kelas: ${matrix.className} — ${matrix.courseName}   |   Jumlah Praktikan: ${matrix.rows.length}   |   Dicetak: ${new Date().toLocaleDateString("id-ID")}`,
+          14,
+          22
+        );
+
+        doc.autoTable({
+          startY: 28,
+          head: [headers],
+          body,
+          theme: "grid",
+          headStyles: { fillColor: [15, 23, 42], textColor: 255, fontSize: 9 },
+          styles: { fontSize: 8.5, cellPadding: 2.5 }
+        });
+
+        const slug = matrix.className.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        doc.save(`Rekap_Nilai_${slug}.pdf`);
+        showToast("Laporan PDF (.pdf) berhasil diunduh!", "success");
+      } catch (err) {
+        showToast("Gagal mengekspor PDF: " + err.message, "error");
+      }
+    }
+
+    // ========================================================================
+    // 10. RENDER SHELL UTAMA & INDIKATOR SYNC
+    // ========================================================================
+    function getSyncDotMeta() {
+      if (ui.syncStatus === "synced") {
+        return { dot: "bg-emerald-400", label: "Tersinkron Google Drive" };
+      }
+      if (ui.syncStatus === "syncing") {
+        return { dot: "bg-blue-400 animate-pulse", label: "Menyinkronkan..." };
+      }
+      if (ui.syncStatus === "offline" || ui.syncStatus === "pending") {
+        return { dot: "bg-amber-400", label: ui.isOffline ? "Offline / Menunggu Jaringan" : "Menunggu Sinkron Drive" };
+      }
+      return { dot: "bg-slate-400", label: "Mode Lokal" };
+    }
+
+    function renderSyncDotOnly() {
+      const el = document.getElementById("header-sync-dot");
+      if (!el) return;
+      const meta = getSyncDotMeta();
+      el.className = `w-2 h-2 rounded-full ${meta.dot} shrink-0`;
+      const lbl = document.getElementById("header-sync-label");
+      if (lbl) lbl.textContent = meta.label;
+    }
+
+    function render() {
+      const root = document.getElementById("app-root");
+      const user = currentUser();
+
+      // Jika belum login, tampilkan layar Login (kecuali sedang melihat Profil tamu)
+      if (!user && ui.activeTab !== "profil") {
+        root.innerHTML = renderLoginScreen();
+        bindLoginEvents();
+        lucide.createIcons();
+        return;
+      }
+
+      // Guard keamanan rute berdasar role
+      if (user) {
+        if (ui.activeTab === "kelas" && !canTeach(user)) ui.activeTab = "artikel";
+        if (ui.activeTab === "nilai" && user.role === "praktikan") ui.activeTab = "artikel";
+        if (ui.activeTab === "asisten" && !isAdmin(user)) ui.activeTab = "artikel";
+      }
+
+      const headerCfg = getHeaderConfig(user);
+      const syncMeta = getSyncDotMeta();
+
+      root.innerHTML = `
+        <!-- Sticky Native Top App Bar -->
+        <header class="shrink-0 bg-slate-900 text-white pt-safe pb-3 px-4 shadow-sm z-30">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-extrabold text-xs tracking-tight shadow-sm shrink-0">
+                LK
+              </div>
+              <div class="min-w-0">
+                <h1 class="font-bold text-[15px] leading-tight truncate">${esc(headerCfg.title)}</h1>
+                <button type="button" id="btn-header-sync-info" class="flex items-center gap-1.5 mt-0.5 text-[10px] text-slate-300 hover:text-white transition">
+                  <span id="header-sync-dot" class="w-2 h-2 rounded-full ${syncMeta.dot} shrink-0"></span>
+                  <span id="header-sync-label" class="truncate">${esc(syncMeta.label)}</span>
+                </button>
+              </div>
+            </div>
+            <div class="shrink-0">${headerCfg.rightHtml || ""}</div>
+          </div>
+        </header>
+
+        <!-- Auto Offline Banner (Anti Random Logout) -->
+        ${
+          ui.isOffline
+            ? `<div class="shrink-0 bg-amber-500 text-white text-[11px] font-semibold px-4 py-1.5 flex items-center justify-center gap-1.5">
+                <i data-lucide="wifi-off" class="w-3.5 h-3.5 shrink-0"></i>
+                <span>Mode offline — Sesi tetap aktif & data aman di perangkat.</span>
+               </div>`
+            : ""
+        }
+
+        <!-- Scrollable Content -->
+        <main id="main-scroll" class="flex-1 overflow-y-auto app-scroll px-4 py-4">
+          ${renderActiveView(user)}
+        </main>
+
+        <!-- Bottom Navigation Bar -->
+        ${user ? renderBottomNav(user) : ""}
+      `;
+
+      bindAppEvents(user);
+      lucide.createIcons();
+    }
+
+    function getHeaderConfig(user) {
+      if (ui.activeTab === "artikel" && ui.articleDetailId) {
+        return {
+          title: "Detail Artikel",
+          rightHtml: `
+            <button type="button" id="btn-back-artikel" class="flex items-center gap-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 px-3 py-1.5 rounded-lg">
+              <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i> Kembali
+            </button>`
+        };
+      }
+
+      if (ui.activeTab === "artikel") {
+        const canAdd = user && (isAdmin(user) || canTeach(user));
+        return {
+          title: "Artikel Labkom",
+          rightHtml: canAdd
+            ? `<button type="button" id="btn-new-article" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i> Tulis
+               </button>`
+            : ""
+        };
+      }
+
+      if (ui.activeTab === "pengumuman") {
+        const taught = user ? getTaughtClasses(user.id) : [];
+        const canPost =
+          ui.announcementTab === "global"
+            ? isAdmin(user)
+            : canTeach(user) && taught.length > 0;
+        return {
+          title: "Pengumuman",
+          rightHtml: canPost
+            ? `<button type="button" id="btn-new-announcement" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i> Buat
+               </button>`
+            : ""
+        };
+      }
+
+      if (ui.activeTab === "tugas") {
+        return {
+          title: "Tugas Praktikum",
+          rightHtml: isAdmin(user)
+            ? `<button type="button" id="btn-new-assignment" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i> Buat Tugas
+               </button>`
+            : ""
+        };
+      }
+
+      if (ui.activeTab === "kelas") {
+        return {
+          title: "Kelas Saya",
+          rightHtml: ui.selectedKelasId
+            ? `<button type="button" id="btn-add-student" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+                <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Praktikan
+               </button>`
+            : ""
+        };
+      }
+
+      if (ui.activeTab === "nilai") {
+        return { title: "Rekapitulasi Nilai", rightHtml: "" };
+      }
+
+      if (ui.activeTab === "asisten") {
+        return {
+          title: "Manajemen Asisten",
+          rightHtml: `<button type="button" id="btn-add-assistant" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Tambah
+          </button>`
+        };
+      }
+
+      // Profil
+      return {
+        title: "Profil & Cadangan",
+        rightHtml: user
+          ? `<button type="button" id="btn-logout-trigger" class="flex items-center gap-1 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+              <i data-lucide="log-out" class="w-3.5 h-3.5"></i> Logout
+             </button>`
+          : `<button type="button" id="btn-goto-login" class="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">
+              <i data-lucide="log-in" class="w-3.5 h-3.5"></i> Login / Daftar
+             </button>`
+      };
+    }
+
+    function renderBottomNav(user) {
+      let tabs = [];
+      if (user.role === "admin") {
+        tabs = [
+          { id: "artikel", label: "Artikel", icon: "newspaper" },
+          { id: "pengumuman", label: "Info", icon: "megaphone" },
+          { id: "tugas", label: "Tugas", icon: "clipboard-list" },
+          { id: "asisten", label: "Asisten", icon: "shield-check" },
+          { id: "nilai", label: "Nilai", icon: "bar-chart-3" },
+          { id: "profil", label: "Profil", icon: "user-circle" }
+        ];
+      } else if (user.role === "asisten") {
+        tabs = [
+          { id: "artikel", label: "Artikel", icon: "newspaper" },
+          { id: "pengumuman", label: "Info", icon: "megaphone" },
+          { id: "tugas", label: "Tugas", icon: "clipboard-list" },
+          { id: "kelas", label: "Kelas", icon: "users" },
+          { id: "nilai", label: "Nilai", icon: "bar-chart-3" },
+          { id: "profil", label: "Profil", icon: "user-circle" }
+        ];
+      } else {
+        tabs = [
+          { id: "artikel", label: "Artikel", icon: "newspaper" },
+          { id: "pengumuman", label: "Pengumuman", icon: "megaphone" },
+          { id: "tugas", label: "Tugas", icon: "clipboard-list" },
+          { id: "profil", label: "Profil", icon: "user-circle" }
+        ];
+      }
+
+      const isSix = tabs.length === 6;
+      return `
+        <nav class="shrink-0 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-safe z-30">
+          <div class="grid ${isSix ? "grid-cols-6" : "grid-cols-4"} h-14">
+            ${tabs
+              .map((t) => {
+                const isActive =
+                  ui.activeTab === t.id ||
+                  (user.role === "admin" && ui.activeTab === "kelas" && t.id === "nilai");
+                return `
+                  <button type="button" data-nav="${t.id}" class="flex flex-col items-center justify-center gap-0.5 px-0.5 transition-colors ${
+                    isActive ? "text-blue-600" : "text-slate-500 hover:text-slate-800"
+                  }">
+                    <i data-lucide="${t.icon}" class="${isSix ? "w-[18px] h-[18px]" : "w-5 h-5"}"></i>
+                    <span class="${isSix ? "text-[10px]" : "text-[11px]"} font-semibold leading-none truncate max-w-full">${t.label}</span>
+                  </button>
+                `;
+              })
+              .join("")}
+          </div>
+        </nav>
+      `;
+    }
+
+    // ========================================================================
+    // 11. VIEW 1: LOGIN / REGISTER + CONFIG GOOGLE APPS SCRIPT
+    // ========================================================================
+    function renderLoginScreen() {
+      const isReg = ui.loginMode === "register";
+      const cloudReady = isCloudConfigured();
+
+      return `
+        <div class="flex-1 overflow-y-auto app-scroll bg-slate-900 px-5 py-7 pt-safe pb-safe flex flex-col justify-between">
+          <div>
+            <!-- Logo Labkom -->
+            <div class="text-center mb-6">
+              <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-emerald-500 text-white mx-auto flex items-center justify-center shadow-lg shadow-blue-600/30 mb-3">
+                <i data-lucide="monitor-smartphone" class="w-8 h-8"></i>
+              </div>
+              <h1 class="text-xl font-extrabold text-white tracking-tight">Laboratorium Komputer</h1>
+              <div class="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${
+                cloudReady
+                  ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                  : "bg-slate-800 text-slate-300 border border-slate-700"
+              }">
+                <span class="w-1.5 h-1.5 rounded-full ${cloudReady ? "bg-emerald-400" : "bg-slate-400"}"></span>
+                <span>${cloudReady ? "Terhubung Google Drive (Apps Script)" : "Mode Demo Lokal (Local-First)"}</span>
+              </div>
+            </div>
+
+            <!-- Main Auth Card -->
+            <div class="bg-white rounded-2xl p-5 shadow-xl">
+              <h2 class="font-bold text-base text-slate-900 mb-3">
+                ${isReg ? "Daftar Akun Praktikan" : "Masuk ke Akun Labkom"}
+              </h2>
+
+              <div id="auth-error" class="hidden mb-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2"></div>
+
+              <form id="auth-form" class="space-y-3">
+                ${
+                  isReg
+                    ? `<div>
+                        <label class="block text-xs font-semibold text-slate-700 mb-1">Nama Lengkap</label>
+                        <input id="inp-fullname" type="text" required placeholder="Contoh: Rina Kartika" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" />
+                      </div>`
+                    : ""
+                }
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">ID / Username (NIM)</label>
+                  <input id="inp-username" type="text" required autocomplete="username" autocapitalize="none" placeholder="Contoh: 2401001 atau admin" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" />
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Password</label>
+                  <div class="relative">
+                    <input id="inp-password" type="${ui.showPassword ? "text" : "password"}" required autocomplete="current-password" placeholder="Masukkan password" class="w-full pl-3.5 pr-11 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" />
+                    <button type="button" id="btn-toggle-pass" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1" aria-label="Tampilkan password">
+                      <i data-lucide="${ui.showPassword ? "eye-off" : "eye"}" class="w-4 h-4"></i>
+                    </button>
+                  </div>
+                </div>
+
+                <button id="btn-auth-submit" type="submit" class="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold text-sm flex items-center justify-center gap-2 transition shadow-sm">
+                  <span>${isReg ? "Daftar Sebagai Praktikan" : "Login"}</span>
+                </button>
+              </form>
+
+              <div class="mt-3.5 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                <button type="button" id="btn-switch-auth-mode" class="text-blue-600 font-semibold hover:underline">
+                  ${isReg ? "Sudah punya akun? Login" : "Daftar Akun Praktikan"}
+                </button>
+                <button type="button" id="btn-forgot-pass" class="text-slate-500 hover:text-slate-800 hover:underline">
+                  Lupa Password?
+                </button>
+              </div>
+            </div>
+
+            <!-- Collapsible: Sambungkan Server Google Drive (Apps Script) -->
+            <div class="mt-3.5 bg-slate-800/90 border border-slate-700/80 rounded-2xl overflow-hidden">
+              <button type="button" id="btn-toggle-gas-panel" class="w-full px-4 py-3 flex items-center justify-between text-left">
+                <div class="flex items-center gap-2 min-w-0">
+                  <i data-lucide="cloud" class="w-4 h-4 text-emerald-400 shrink-0"></i>
+                  <span class="text-xs font-semibold text-slate-200 truncate">Sambungkan Server Google Drive (Apps Script)</span>
+                </div>
+                <i data-lucide="${ui.showGasConfigOnLogin ? "chevron-up" : "chevron-down"}" class="w-4 h-4 text-slate-400 shrink-0"></i>
+              </button>
+              ${
+                ui.showGasConfigOnLogin
+                  ? `<div class="px-4 pb-4 pt-1 border-t border-slate-700/70 space-y-2.5">
+                      <p class="text-[11px] text-slate-400 leading-relaxed">
+                        Tempel URL Web App <code class="text-emerald-300">Code.gs</code> Anda untuk mengaktifkan sinkronisasi multi-user & auto-backup Google Drive.
+                      </p>
+                      <input id="inp-login-gas-url" type="url" value="${esc(gasUrl)}" placeholder="https://script.google.com/macros/s/.../exec" class="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-600 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                      <div class="flex gap-2">
+                        <button type="button" id="btn-login-test-gas" class="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5">
+                          <i data-lucide="plug-zap" class="w-3.5 h-3.5"></i> Tes & Simpan
+                        </button>
+                        ${
+                          cloudReady
+                            ? `<button type="button" id="btn-login-clear-gas" class="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold">Putuskan</button>`
+                            : ""
+                        }
+                      </div>
+                      <div id="login-gas-status" class="hidden text-[11px] rounded-lg px-2.5 py-1.5"></div>
+                    </div>`
+                  : ""
+              }
+            </div>
+
+            <!-- 1-Click Demo Quick-Fill Pills (Hanya di Mode Lokal) -->
+            ${
+              !isReg && !cloudReady
+                ? `<div class="mt-3.5 bg-slate-800/80 border border-slate-700/70 rounded-2xl p-3.5">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                        <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i> Uji Cepat Demo (Pass: 123456)
+                      </span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                      <button type="button" data-demo-user="admin" class="text-left px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-700 border border-slate-700 transition">
+                        <div class="text-xs font-bold text-white">Admin</div>
+                        <div class="text-[10px] text-slate-400">ID: admin</div>
+                      </button>
+                      <button type="button" data-demo-user="adminasisten" class="text-left px-3 py-2 rounded-xl bg-indigo-950/90 hover:bg-indigo-900 border border-indigo-700/70 transition">
+                        <div class="text-xs font-bold text-indigo-200">Admin+Asisten</div>
+                        <div class="text-[10px] text-indigo-300">ID: adminasisten</div>
+                      </button>
+                      <button type="button" data-demo-user="asisten1" class="text-left px-3 py-2 rounded-xl bg-blue-950/90 hover:bg-blue-900 border border-blue-700/70 transition">
+                        <div class="text-xs font-bold text-blue-200">Asisten</div>
+                        <div class="text-[10px] text-blue-300">ID: asisten1</div>
+                      </button>
+                      <button type="button" data-demo-user="2401001" class="text-left px-3 py-2 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 border border-emerald-700/70 transition">
+                        <div class="text-xs font-bold text-emerald-200">Praktikan</div>
+                        <div class="text-[10px] text-emerald-300">ID: 2401001</div>
+                      </button>
+                    </div>
+                  </div>`
+                : ""
+            }
+          </div>
+
+          <div class="mt-5 text-center">
+            <button type="button" id="btn-reset-demo-login" class="text-[11px] text-slate-400 hover:text-white underline">
+              Reset Data Lokal ke Kondisi Awal
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function bindLoginEvents() {
+      const form = document.getElementById("auth-form");
+      const errBox = document.getElementById("auth-error");
+      const showAuthError = (msg) => {
+        errBox.innerHTML = `<i data-lucide="alert-circle" class="w-4 h-4 shrink-0 mt-0.5"></i><span>${esc(msg)}</span>`;
+        errBox.classList.remove("hidden");
+        lucide.createIcons();
+      };
+
+      document.getElementById("btn-toggle-pass")?.addEventListener("click", () => {
+        ui.showPassword = !ui.showPassword;
+        const inp = document.getElementById("inp-password");
+        if (inp) inp.type = ui.showPassword ? "text" : "password";
+        const btn = document.getElementById("btn-toggle-pass");
+        if (btn) {
+          btn.innerHTML = `<i data-lucide="${ui.showPassword ? "eye-off" : "eye"}" class="w-4 h-4"></i>`;
+          lucide.createIcons();
+        }
+      });
+
+      document.getElementById("btn-switch-auth-mode")?.addEventListener("click", () => {
+        ui.loginMode = ui.loginMode === "login" ? "register" : "login";
+        render();
+      });
+
+      document.getElementById("btn-forgot-pass")?.addEventListener("click", () => {
+        openModal(
+          "Bantuan Lupa Password",
+          `<div class="space-y-3 text-xs text-slate-600 leading-relaxed">
+            <p>Untuk menjaga keamanan data praktikum, reset password hanya dapat dilakukan oleh <strong>Admin Laboratorium Komputer</strong>.</p>
+            <p>Hubungi Koordinator Labkom atau Asisten pengampu kelas Anda dengan menyertakan <strong>NIM/ID</strong> dan <strong>Nama Lengkap</strong>.</p>
+            <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 text-blue-800">
+              <strong>Mode Demo Lokal:</strong> Seluruh akun demo menggunakan password <code class="font-bold">123456</code>.
+            </div>
+            <button type="button" data-close-modal class="w-full py-2.5 bg-slate-900 text-white rounded-xl font-semibold">Mengerti</button>
+          </div>`
+        );
+      });
+
+      document.getElementById("btn-toggle-gas-panel")?.addEventListener("click", () => {
+        ui.showGasConfigOnLogin = !ui.showGasConfigOnLogin;
+        render();
+      });
+
+      document.getElementById("btn-login-test-gas")?.addEventListener("click", async () => {
+        const inp = document.getElementById("inp-login-gas-url");
+        const statusEl = document.getElementById("login-gas-status");
+        const url = (inp?.value || "").trim();
+        if (!/^https?:\/\//i.test(url)) {
+          statusEl.className = "text-[11px] rounded-lg px-2.5 py-1.5 bg-rose-500/20 text-rose-200";
+          statusEl.textContent = "Masukkan URL Google Apps Script yang valid (diawali https://).";
+          statusEl.classList.remove("hidden");
+          return;
+        }
+        statusEl.className = "text-[11px] rounded-lg px-2.5 py-1.5 bg-blue-500/20 text-blue-200";
+        statusEl.textContent = "Menguji koneksi ke Google Apps Script...";
+        statusEl.classList.remove("hidden");
+
+        const res = await callGas("ping", {}, url);
+        if (res.ok) {
+          persistGasUrl(url);
+          showToast("Terhubung ke server Google Drive (Apps Script)!", "success");
+          render();
+        } else {
+          statusEl.className = "text-[11px] rounded-lg px-2.5 py-1.5 bg-rose-500/20 text-rose-200";
+          statusEl.textContent = res.error || "Gagal terhubung ke Apps Script.";
+        }
+      });
+
+      document.getElementById("btn-login-clear-gas")?.addEventListener("click", () => {
+        persistGasUrl("");
+        showToast("Koneksi Apps Script diputus. Beralih ke Mode Lokal.", "info");
+        render();
+      });
+
+      document.querySelectorAll("[data-demo-user]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.getElementById("inp-username").value = btn.getAttribute("data-demo-user");
+          document.getElementById("inp-password").value = "123456";
+          form.dispatchEvent(new Event("submit", { cancelable: true }));
+        });
+      });
+
+      document.getElementById("btn-reset-demo-login")?.addEventListener("click", confirmResetLocalData);
+
+      form?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (ui.isSubmittingAuth) return; // Anti klik ganda
+        errBox.classList.add("hidden");
+
+        const cleanUser = document.getElementById("inp-username").value.trim().toLowerCase().replace(/\s+/g, "");
+        const password = document.getElementById("inp-password").value;
+        const fullName = ui.loginMode === "register" ? document.getElementById("inp-fullname").value.trim() : "";
+
+        if (cleanUser.length < 3) {
+          showAuthError("ID/Username (NIM) minimal 3 karakter tanpa spasi.");
+          return;
+        }
+        if (password.length < 6) {
+          showAuthError("Password minimal harus terdiri dari 6 karakter.");
+          return;
+        }
+        if (ui.loginMode === "register" && fullName.length < 2) {
+          showAuthError("Nama lengkap wajib diisi.");
+          return;
+        }
+
+        ui.isSubmittingAuth = true;
+        const btn = document.getElementById("btn-auth-submit");
+        btn.disabled = true;
+        btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Memproses...</span>`;
+        lucide.createIcons();
+
+        const resetBtn = () => {
+          ui.isSubmittingAuth = false;
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = `<span>${ui.loginMode === "register" ? "Daftar Sebagai Praktikan" : "Login"}</span>`;
+          }
+        };
+
+        // --- CLOUD MODE (Google Apps Script) ---
+        if (isCloudConfigured()) {
+          const action = ui.loginMode === "register" ? "register" : "login";
+          const payload =
+            action === "register"
+              ? { username: cleanUser, full_name: fullName, password }
+              : { username: cleanUser, password };
+
+          const res = await callGas(action, payload);
+          if (!res.ok) {
+            resetBtn();
+            showAuthError(res.error || "ID/Username atau Password salah.");
+            return;
+          }
+
+          persistSession({
+            token: res.data.token || "",
+            user: sanitizeUserObj(res.data.user),
+            mode: "cloud"
+          });
+          if (res.data.state) mergeCloudState(res.data.state);
+          ui.isSubmittingAuth = false;
+          ui.activeTab = "artikel";
+          ui.articleDetailId = null;
+          ui.loginMode = "login";
+          updateSyncIndicator("synced");
+          showToast(`Selamat datang, ${session.user.full_name}!`, "success");
+          render();
+          syncFromCloud(true);
+          return;
+        }
+
+        // --- LOCAL DEMO MODE ---
+        setTimeout(() => {
+          if (ui.loginMode === "register") {
+            if (db.users.some((u) => u.username === cleanUser)) {
+              resetBtn();
+              showAuthError("ID/Username tersebut sudah terdaftar. Silakan langsung Login.");
+              return;
+            }
+            const newUser = {
+              id: uid("u"),
+              username: cleanUser,
+              password,
+              full_name: fullName,
+              role: "praktikan", // Terkunci mutlak ke praktikan
+              is_asisten: false,
+              created_at: new Date().toISOString()
+            };
+            db.users.push(newUser);
+            if (db.classes[0]) {
+              db.enrollments.push({ id: uid("en"), class_id: db.classes[0].id, student_id: newUser.id });
+            }
+            persistState(true);
+            persistSession({ token: "local-" + newUser.id, user: sanitizeUserObj(newUser), mode: "local" });
+            ui.isSubmittingAuth = false;
+            ui.activeTab = "artikel";
+            ui.loginMode = "login";
+            showToast(`Pendaftaran berhasil! Selamat datang, ${newUser.full_name}.`, "success");
+            render();
+            return;
+          }
+
+          const found = db.users.find((u) => u.username === cleanUser && u.password === password);
+          if (!found) {
+            resetBtn();
+            showAuthError("ID/Username atau Password salah. Periksa kembali penulisan NIM/ID Anda.");
+            return;
+          }
+
+          persistSession({ token: "local-" + found.id, user: sanitizeUserObj(found), mode: "local" });
+          ui.isSubmittingAuth = false;
+          ui.activeTab = "artikel";
+          ui.articleDetailId = null;
+          ui.selectedKelasId = "";
+          ui.selectedNilaiClassId = "";
+          showToast(`Masuk sebagai ${found.full_name} (${getRoleLabel(found)})`, "success");
+          render();
+        }, 280);
+      });
+    }
+
+    // ========================================================================
+    // 12. ROUTER VIEW AKTIF
+    // ========================================================================
+    function renderActiveView(user) {
+      if (!user && ui.activeTab === "profil") return renderProfilView(null);
+      switch (ui.activeTab) {
+        case "artikel":
+          return ui.articleDetailId ? renderArtikelDetailView(user) : renderArtikelListView(user);
+        case "pengumuman":
+          return renderPengumumanView(user);
+        case "tugas":
+          return renderTugasView(user);
+        case "kelas":
+          return renderKelasView(user);
+        case "nilai":
+          return renderNilaiView(user);
+        case "asisten":
+          return renderAsistenView(user);
+        case "profil":
+          return renderProfilView(user);
+        default:
+          return renderArtikelListView(user);
+      }
+    }
+
+    // --- VIEW 2A: ARTIKEL LIST ---
+    function renderArtikelListView(user) {
+      const q = ui.articleSearch.trim().toLowerCase();
+      const filtered = db.articles
+        .filter((a) => !q || a.title.toLowerCase().includes(q) || a.excerpt.toLowerCase().includes(q))
+        .sort((a, b) =>
+          ui.articleSort === "desc"
+            ? new Date(b.created_at) - new Date(a.created_at)
+            : new Date(a.created_at) - new Date(b.created_at)
+        );
+
+      return `
+        <div class="flex gap-2 mb-4">
+          <div class="relative flex-1">
+            <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input id="inp-article-search" type="text" value="${esc(ui.articleSearch)}" placeholder="Cari artikel praktikum..." class="w-full pl-9 pr-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" />
+          </div>
+          <button type="button" id="btn-sort-article" class="px-3 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl text-xs font-semibold text-slate-700 flex items-center gap-1.5 shrink-0">
+            <i data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-blue-600"></i>
+            ${ui.articleSort === "desc" ? "Terbaru" : "Terlama"}
+          </button>
+        </div>
+
+        ${
+          filtered.length === 0
+            ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+                Belum ada artikel yang sesuai dengan pencarian.
+               </div>`
+            : `<div class="space-y-3.5">
+                ${filtered
+                  .map((art) => {
+                    const author = db.users.find((u) => u.id === art.author_id);
+                    const likeCount = db.likes.filter((l) => l.article_id === art.id).length;
+                    const cmtCount = db.comments.filter((c) => c.article_id === art.id).length;
+                    return `
+                      <article class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition">
+                        ${renderArticleThumb(art, false)}
+                        <div class="p-4">
+                          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-500 mb-1">
+                            <span>${formatDate(art.created_at)}</span>
+                            ${
+                              isAdmin(user)
+                                ? `<button type="button" data-del-article="${art.id}" class="text-rose-500 hover:bg-rose-50 p-1 rounded-lg" aria-label="Hapus artikel">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                   </button>`
+                                : ""
+                            }
+                          </div>
+                          <h2 class="font-bold text-slate-900 text-[15px] leading-snug">${esc(art.title)}</h2>
+                          <p class="text-xs text-slate-600 mt-1.5 line-clamp-2 leading-relaxed">${esc(art.excerpt)}</p>
+                          <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between">
+                            <div class="flex items-center gap-3 text-[11px] text-slate-500">
+                              <span class="font-medium text-slate-600 truncate max-w-[125px]">${esc(author ? author.full_name : "Tim Labkom")}</span>
+                              <span class="flex items-center gap-1"><i data-lucide="heart" class="w-3 h-3 text-rose-500"></i> ${likeCount}</span>
+                              <span class="flex items-center gap-1"><i data-lucide="message-circle" class="w-3 h-3 text-blue-500"></i> ${cmtCount}</span>
+                            </div>
+                            <button type="button" data-open-article="${art.id}" class="inline-flex items-center gap-1 text-xs font-bold text-blue-600 hover:text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg">
+                              Baca <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    `;
+                  })
+                  .join("")}
+              </div>`
+        }
+      `;
+    }
+
+    // --- VIEW 2B: ARTIKEL DETAIL ---
+    function renderArtikelDetailView(user) {
+      const art = db.articles.find((a) => a.id === ui.articleDetailId);
+      if (!art) {
+        ui.articleDetailId = null;
+        return renderArtikelListView(user);
+      }
+      const author = db.users.find((u) => u.id === art.author_id);
+      const artLikes = db.likes.filter((l) => l.article_id === art.id);
+      const isLiked = artLikes.some((l) => l.user_id === user.id);
+      const artComments = db.comments
+        .filter((c) => c.article_id === art.id)
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+      return `
+        <article class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm animate-fade-up">
+          ${renderArticleThumb(art, true)}
+          <div class="p-4">
+            <div class="flex items-center gap-2 text-[11px] text-slate-500">
+              <span>${formatDate(art.created_at)}</span>
+              <span>•</span>
+              <span class="font-medium text-slate-700">${esc(author ? author.full_name : "Tim Labkom")}</span>
+            </div>
+            <h1 class="text-lg font-extrabold text-slate-900 mt-1.5 leading-snug">${esc(art.title)}</h1>
+            <div class="mt-3.5 text-sm text-slate-700 whitespace-pre-line leading-relaxed">${esc(art.content)}</div>
+
+            <div class="mt-5 pt-3 border-t border-slate-100 flex items-center gap-3">
+              <button type="button" id="btn-like-article" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+                isLiked ? "bg-rose-50 text-rose-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }">
+                <i data-lucide="heart" class="w-4 h-4 ${isLiked ? "fill-rose-600" : ""}"></i>
+                <span>${artLikes.length}</span>
+              </button>
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                <i data-lucide="message-circle" class="w-4 h-4"></i>
+                <span>${artComments.length}</span>
+              </div>
+              <button type="button" id="btn-share-article" class="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 text-blue-600 hover:bg-blue-100 text-xs font-bold">
+                <i data-lucide="share-2" class="w-3.5 h-3.5"></i> Bagikan
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Komentar -->
+        <section class="mt-4 bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+          <h3 class="font-bold text-sm text-slate-900 mb-3">Komentar (${artComments.length})</h3>
+          <div class="space-y-2.5 mb-4">
+            ${
+              artComments.length === 0
+                ? `<p class="text-xs text-slate-400 text-center py-3">Belum ada komentar.</p>`
+                : artComments
+                    .map((c) => {
+                      const commenter = db.users.find((u) => u.id === c.user_id);
+                      const roleText = c.author_role || getRoleLabel(commenter);
+                      const classText = c.author_class || getUserClassLabel(commenter);
+                      const fullName = c.author_name || (commenter ? commenter.full_name : "Pengguna");
+                      const badgeCls =
+                        commenter?.role === "admin"
+                          ? "bg-indigo-100 text-indigo-700"
+                          : commenter?.role === "asisten"
+                          ? "bg-blue-100 text-blue-700"
+                          : "bg-emerald-100 text-emerald-700";
+                      return `
+                        <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                          <div class="flex flex-wrap items-center gap-1.5">
+                            <span class="font-bold text-xs text-slate-900">${esc(fullName)}</span>
+                            <span class="px-1.5 py-0.5 rounded-md ${badgeCls} font-bold text-[10px]">${esc(roleText)}</span>
+                            <span class="text-[10px] text-slate-500">• ${esc(classText)}</span>
+                          </div>
+                          <p class="text-xs text-slate-700 mt-1.5 leading-relaxed">${esc(c.content)}</p>
+                          <div class="text-[10px] text-slate-400 mt-1">${formatDate(c.created_at, true)}</div>
+                        </div>
+                      `;
+                    })
+                    .join("")
+            }
+          </div>
+
+          <form id="form-comment" class="flex gap-2">
+            <input id="inp-comment" type="text" required placeholder="Tulis komentar Anda..." class="flex-1 px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 focus:bg-white" />
+            <button type="submit" class="px-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl flex items-center justify-center">
+              <i data-lucide="send" class="w-4 h-4"></i>
+            </button>
+          </form>
+        </section>
+      `;
+    }
+
+    // --- VIEW 3: PENGUMUMAN ---
+    function renderPengumumanView(user) {
+      const enrolledIds = getEnrolledClasses(user.id).map((c) => c.id);
+      const taughtIds = getTaughtClasses(user.id).map((c) => c.id);
+
+      const list = db.announcements
+        .filter((ann) => {
+          if (ann.scope !== ui.announcementTab) return false;
+          if (ann.scope === "global") return true;
+          if (user.role === "praktikan") return enrolledIds.includes(ann.class_id);
+          if (canTeach(user)) return taughtIds.includes(ann.class_id);
+          return false;
+        })
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+      return `
+        <div class="grid grid-cols-2 bg-slate-200/80 p-1 rounded-xl mb-4">
+          <button type="button" data-ann-tab="global" class="py-2 text-xs font-bold rounded-lg transition ${
+            ui.announcementTab === "global" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+          }">Global</button>
+          <button type="button" data-ann-tab="asisten" class="py-2 text-xs font-bold rounded-lg transition ${
+            ui.announcementTab === "asisten" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+          }">Asisten</button>
+        </div>
+
+        ${
+          ui.announcementTab === "asisten" && isAdmin(user) && !isDualRoleAdmin(user)
+            ? `<div class="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                Anda masuk sebagai <strong>Admin Murni</strong>. Tab Pengumuman Asisten khusus bagi Asisten atau Admin Dual-Role yang mengampu kelas.
+               </div>`
+            : ""
+        }
+
+        ${
+          list.length === 0
+            ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+                Belum ada pengumuman pada tab ini.
+               </div>`
+            : `<div class="space-y-3">
+                ${list
+                  .map((ann) => {
+                    const author = db.users.find((u) => u.id === ann.author_id);
+                    const cls = db.classes.find((c) => c.id === ann.class_id);
+                    const canDelete =
+                      (ann.scope === "global" && isAdmin(user)) ||
+                      (ann.scope === "asisten" && canTeach(user) && taughtIds.includes(ann.class_id));
+                    return `
+                      <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+                        <div class="flex items-start justify-between gap-2">
+                          <div class="flex items-start gap-2.5 min-w-0">
+                            <div class="w-8 h-8 rounded-xl ${ann.scope === "global" ? "bg-blue-50 text-blue-600" : "bg-indigo-50 text-indigo-600"} flex items-center justify-center shrink-0 mt-0.5">
+                              <i data-lucide="megaphone" class="w-4 h-4"></i>
+                            </div>
+                            <div class="min-w-0">
+                              <span class="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                ann.scope === "global" ? "bg-blue-100 text-blue-700" : "bg-indigo-100 text-indigo-700"
+                              }">
+                                ${ann.scope === "global" ? "Global Labkom" : "Kelas " + esc(cls ? cls.name : "")}
+                              </span>
+                              <h3 class="font-bold text-sm text-slate-900 mt-1">${esc(ann.title)}</h3>
+                            </div>
+                          </div>
+                          ${
+                            canDelete
+                              ? `<button type="button" data-del-ann="${ann.id}" class="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg shrink-0" aria-label="Hapus pengumuman">
+                                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                 </button>`
+                              : ""
+                          }
+                        </div>
+                        <p class="text-xs text-slate-600 mt-2.5 whitespace-pre-line leading-relaxed">${esc(ann.content)}</p>
+                        <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                          <span class="font-medium">${esc(author ? author.full_name : "Labkom")}</span>
+                          <span>${formatDate(ann.created_at, true)}</span>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")}
+              </div>`
+        }
+      `;
+    }
+
+    // --- VIEW 4: TUGAS (GOOGLE CLASSROOM STYLE) ---
+    function renderTugasView(user) {
+      const now = new Date();
+      const enrolledIds = getEnrolledClasses(user.id).map((c) => c.id);
+      const taughtIds = getTaughtClasses(user.id).map((c) => c.id);
+
+      const visibleAssignments = db.assignments
+        .filter((asg) => {
+          if (isAdmin(user)) return true;
+          if (user.role === "asisten") return taughtIds.includes(asg.class_id);
+          // Praktikan: hanya tugas kelasnya & waktu rilis sudah tiba
+          return enrolledIds.includes(asg.class_id) && new Date(asg.release_at) <= now;
+        })
+        .sort((a, b) => new Date(b.release_at) - new Date(a.release_at));
+
+      return visibleAssignments.length === 0
+        ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+            Belum ada tugas yang dirilis untuk kelas Anda.
+           </div>`
+        : `<div class="space-y-3.5">
+            ${visibleAssignments
+              .map((asg) => {
+                const cls = db.classes.find((c) => c.id === asg.class_id);
+                const isFuture = new Date(asg.release_at) > now;
+                const mySub =
+                  user.role === "praktikan"
+                    ? db.submissions.find((s) => s.assignment_id === asg.id && s.student_id === user.id)
+                    : null;
+                const totalSubs = db.submissions.filter((s) => s.assignment_id === asg.id).length;
+
+                return `
+                  <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+                    <div class="flex items-start gap-3">
+                      <div class="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 flex items-center justify-center shrink-0">
+                        <i data-lucide="clipboard-list" class="w-5 h-5"></i>
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex flex-wrap items-center gap-1.5">
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${esc(cls ? cls.name : "-")}</span>
+                          ${
+                            isFuture
+                              ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1">
+                                  <i data-lucide="calendar-clock" class="w-3 h-3"></i> Terjadwal
+                                 </span>`
+                              : ""
+                          }
+                          ${
+                            user.role === "praktikan"
+                              ? mySub
+                                ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-1">
+                                    <i data-lucide="check-circle-2" class="w-3 h-3"></i> Sudah Dikumpulkan
+                                   </span>`
+                                : `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 flex items-center gap-1">
+                                    <i data-lucide="clock" class="w-3 h-3"></i> Belum Dikumpulkan
+                                   </span>`
+                              : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">${totalSubs} Terkumpul</span>`
+                          }
+                        </div>
+
+                        <h3 class="font-bold text-sm text-slate-900 mt-1.5">${esc(asg.title)}</h3>
+                        <p class="text-xs text-slate-600 mt-1 whitespace-pre-line leading-relaxed">${esc(asg.description)}</p>
+
+                        <div class="mt-2.5 text-[11px] text-slate-500 space-y-0.5 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                          <div class="flex items-center gap-1.5">
+                            <i data-lucide="calendar" class="w-3 h-3 text-slate-400"></i>
+                            <span>Rilis: <strong>${formatDate(asg.release_at, true)}</strong></span>
+                          </div>
+                          ${
+                            asg.due_at
+                              ? `<div class="flex items-center gap-1.5 text-rose-600">
+                                  <i data-lucide="alarm-clock" class="w-3 h-3"></i>
+                                  <span>Tenggat: <strong>${formatDate(asg.due_at, true)}</strong></span>
+                                 </div>`
+                              : ""
+                          }
+                        </div>
+
+                        <div class="mt-3 flex flex-wrap gap-2">
+                          ${
+                            asg.file_name
+                              ? `<button type="button" data-dl-material="${asg.id}" class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold">
+                                  <i data-lucide="download" class="w-3.5 h-3.5"></i> Download Soal
+                                 </button>`
+                              : ""
+                          }
+                          ${
+                            user.role === "praktikan"
+                              ? `<label class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer">
+                                  <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                                  <span>${mySub ? "Ganti File Tugas" : "Upload Tugas"}</span>
+                                  <input type="file" data-upload-sub="${asg.id}" accept="${ALLOWED_EXT.join(",")}" class="hidden" />
+                                 </label>`
+                              : ""
+                          }
+                        </div>
+
+                        ${
+                          mySub
+                            ? `<div class="mt-2.5 p-2 rounded-lg bg-emerald-50 border border-emerald-100 text-[11px] text-emerald-800 flex items-center justify-between gap-2">
+                                <span class="truncate"><strong>Terkirim:</strong> ${esc(mySub.file_name)} (${formatBytes(mySub.file_size)})</span>
+                                <button type="button" data-dl-sub="${mySub.id}" class="text-emerald-700 font-bold underline shrink-0">Unduh</button>
+                               </div>`
+                            : ""
+                        }
+                      </div>
+                    </div>
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>`;
+    }
+
+    // --- VIEW 5: KELAS (ASISTEN & DUAL-ROLE ADMIN) ---
+    function renderKelasView(user) {
+      const taught = getTaughtClasses(user.id);
+      if (taught.length === 0) {
+        return `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+          Anda belum ditugaskan mengampu kelas mana pun. Atur pembagian kelas di menu <strong>Asisten</strong>.
+        </div>`;
+      }
+
+      if (!ui.selectedKelasId || !taught.some((c) => c.id === ui.selectedKelasId)) {
+        ui.selectedKelasId = taught[0].id;
+      }
+
+      const activeClass = taught.find((c) => c.id === ui.selectedKelasId);
+      const studentIds = db.enrollments.filter((e) => e.class_id === activeClass.id).map((e) => e.student_id);
+      const students = db.users
+        .filter((u) => studentIds.includes(u.id))
+        .sort((a, b) => a.username.localeCompare(b.username));
+      const classAsgIds = db.assignments.filter((a) => a.class_id === activeClass.id).map((a) => a.id);
+
+      return `
+        ${
+          isDualRoleAdmin(user)
+            ? `<div class="mb-3 flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-xl px-3.5 py-2.5 text-xs text-indigo-800">
+                <span class="font-semibold">Mode Dual-Role Admin + Asisten</span>
+                <button type="button" data-nav="nilai" class="font-bold underline">Ke Rekap Nilai</button>
+               </div>`
+            : ""
+        }
+
+        <label class="block text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Kelas yang Diampu</label>
+        <select id="sel-kelas-asisten" class="w-full mb-4 px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600">
+          ${taught
+            .map(
+              (c) => `<option value="${c.id}" ${c.id === activeClass.id ? "selected" : ""}>${esc(c.name)} — ${esc(c.course_name)}</option>`
+            )
+            .join("")}
+        </select>
+
+        <div class="flex items-center justify-between mb-2.5 text-xs text-slate-600">
+          <span>Daftar Praktikan: <strong>${students.length} orang</strong></span>
+          <span class="text-[11px] text-slate-400">Ketuk nama untuk menilai</span>
+        </div>
+
+        ${
+          students.length === 0
+            ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+                Belum ada praktikan di kelas ini. Klik <strong>+ Praktikan</strong> di pojok kanan atas.
+               </div>`
+            : `<div class="space-y-2.5">
+                ${students
+                  .map((st) => {
+                    const subCount = db.submissions.filter(
+                      (s) => s.student_id === st.id && classAsgIds.includes(s.assignment_id)
+                    ).length;
+                    const gradedCount = db.grades.filter(
+                      (g) => g.student_id === st.id && g.class_id === activeClass.id
+                    ).length;
+                    return `
+                      <div class="bg-white rounded-2xl border border-slate-200 px-3.5 py-3 flex items-center justify-between gap-2 shadow-sm hover:border-blue-300 transition">
+                        <button type="button" data-open-student="${st.id}" class="flex-1 flex items-center gap-3 text-left min-w-0">
+                          <div class="w-10 h-10 rounded-full bg-blue-100 text-blue-700 font-bold text-sm flex items-center justify-center shrink-0">
+                            ${esc(st.full_name.charAt(0).toUpperCase())}
+                          </div>
+                          <div class="min-w-0 flex-1">
+                            <div class="font-bold text-sm text-slate-900 truncate">${esc(st.full_name)}</div>
+                            <div class="text-[11px] text-slate-500 flex items-center gap-1.5 mt-0.5">
+                              <span class="font-mono">NIM: ${esc(st.username)}</span>
+                              <span>•</span>
+                              <span class="text-blue-600 font-medium">${subCount} tugas (${gradedCount} dinilai)</span>
+                            </div>
+                          </div>
+                          <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 shrink-0"></i>
+                        </button>
+                        <button type="button" data-remove-student="${st.id}" class="p-2 text-rose-500 hover:bg-rose-50 rounded-xl shrink-0" aria-label="Hapus praktikan">
+                          <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                      </div>
+                    `;
+                  })
+                  .join("")}
+              </div>`
+        }
+      `;
+    }
+
+    // --- VIEW 6: NILAI (REKAP REAL-TIME + EXPORT + DUAL-ROLE BUTTON) ---
+    function renderNilaiView(user) {
+      const availableClasses = isAdmin(user) ? db.classes : getTaughtClasses(user.id);
+      if (availableClasses.length === 0) {
+        return `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+          Belum ada kelas yang tersedia untuk rekapitulasi nilai.
+        </div>`;
+      }
+
+      if (!ui.selectedNilaiClassId || !availableClasses.some((c) => c.id === ui.selectedNilaiClassId)) {
+        ui.selectedNilaiClassId = availableClasses[0].id;
+      }
+
+      const matrix = buildGradeMatrix(ui.selectedNilaiClassId);
+      const dualAdmin = isDualRoleAdmin(user);
+
+      return `
+        ${
+          dualAdmin
+            ? `<button type="button" id="btn-dualrole-kelas" class="mb-3.5 w-full py-3 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-md shadow-indigo-600/20 transition">
+                <i data-lucide="users" class="w-4 h-4"></i>
+                <span>Mode Asisten: Kelola Praktikan & Input Nilai Kelas Saya</span>
+               </button>`
+            : ""
+        }
+
+        <label class="block text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Filter Kelas</label>
+        <select id="sel-kelas-nilai" class="w-full mb-3.5 px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600">
+          ${availableClasses
+            .map(
+              (c) => `<option value="${c.id}" ${c.id === ui.selectedNilaiClassId ? "selected" : ""}>${esc(c.name)} — ${esc(c.course_name)}</option>`
+            )
+            .join("")}
+        </select>
+
+        <!-- 3 Tombol Export Client-Side -->
+        <div class="grid grid-cols-3 gap-2 mb-4">
+          <button type="button" id="btn-export-xlsx" class="py-2.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm">
+            <i data-lucide="file-spreadsheet" class="w-4 h-4"></i> Excel
+          </button>
+          <button type="button" id="btn-export-docx" class="py-2.5 px-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm">
+            <i data-lucide="file-text" class="w-4 h-4"></i> Word
+          </button>
+          <button type="button" id="btn-export-pdf" class="py-2.5 px-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm">
+            <i data-lucide="file-down" class="w-4 h-4"></i> PDF
+          </button>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+          <div class="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs text-slate-600">
+            <span>Kelas: <strong class="text-slate-900">${esc(matrix.className)}</strong></span>
+            <span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-bold text-[11px]">${matrix.rows.length} Praktikan</span>
+          </div>
+
+          ${
+            matrix.rows.length === 0
+              ? `<div class="p-8 text-center text-xs text-slate-500">Belum ada praktikan terdaftar pada kelas ini.</div>`
+              : `<div class="overflow-x-auto app-scroll">
+                  <table class="w-full text-xs text-left">
+                    <thead class="bg-slate-900 text-white">
+                      <tr>
+                        <th class="px-3 py-2.5 font-semibold">No</th>
+                        <th class="px-3 py-2.5 font-semibold">NIM</th>
+                        <th class="px-3 py-2.5 font-semibold">Nama Praktikan</th>
+                        ${matrix.assignments
+                          .map((a, i) => `<th class="px-3 py-2.5 font-semibold text-center whitespace-nowrap" title="${esc(a.title)}">T${i + 1}</th>`)
+                          .join("")}
+                        <th class="px-3 py-2.5 font-semibold text-center">Rata²</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                      ${matrix.rows
+                        .map(
+                          (r) => `
+                            <tr class="hover:bg-slate-50">
+                              <td class="px-3 py-2.5 text-slate-500">${r.no}</td>
+                              <td class="px-3 py-2.5 font-mono text-slate-700">${esc(r.nim)}</td>
+                              <td class="px-3 py-2.5 font-semibold text-slate-900 whitespace-nowrap">${esc(r.fullName)}</td>
+                              ${matrix.assignments
+                                .map(
+                                  (a) => `<td class="px-3 py-2.5 text-center ${r.scores[a.id] !== null ? "font-semibold text-slate-800" : "text-slate-400"}">
+                                    ${r.scores[a.id] !== null ? r.scores[a.id] : "-"}
+                                  </td>`
+                                )
+                                .join("")}
+                              <td class="px-3 py-2.5 text-center font-extrabold text-blue-700">
+                                ${r.average !== null ? r.average.toFixed(1) : "-"}
+                              </td>
+                            </tr>
+                          `
+                        )
+                        .join("")}
+                    </tbody>
+                  </table>
+                </div>`
+          }
+
+          ${
+            matrix.assignments.length > 0
+              ? `<div class="px-4 py-2.5 bg-slate-50 border-t border-slate-100 text-[10px] text-slate-500 space-y-0.5">
+                  <div class="font-bold text-slate-600 mb-1">Keterangan Kolom Tugas:</div>
+                  ${matrix.assignments.map((a, i) => `<div><strong>T${i + 1}:</strong> ${esc(a.title)}</div>`).join("")}
+                 </div>`
+              : ""
+          }
+        </div>
+      `;
+    }
+
+    // --- VIEW 7: ASISTEN (ADMIN ONLY) ---
+    function renderAsistenView(user) {
+      const staff = db.users
+        .filter((u) => u.role === "admin" || u.role === "asisten")
+        .sort((a, b) => (a.role === b.role ? a.full_name.localeCompare(b.full_name) : a.role === "admin" ? -1 : 1));
+
+      return `
+        <div class="space-y-3.5">
+          ${staff
+            .map((p) => {
+              const assignedIds = db.class_assistants
+                .filter((ca) => ca.assistant_id === p.id)
+                .map((ca) => ca.class_id);
+              const canAssign = p.role === "asisten" || (p.role === "admin" && p.is_asisten);
+
+              return `
+                <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+                  <div class="flex items-start justify-between gap-2">
+                    <div>
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <h3 class="font-bold text-sm text-slate-900">${esc(p.full_name)}</h3>
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          p.role === "admin" ? "bg-indigo-100 text-indigo-700" : "bg-blue-100 text-blue-700"
+                        }">${esc(getRoleLabel(p))}</span>
+                        ${p.id === user.id ? `<span class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">Anda</span>` : ""}
+                      </div>
+                      <p class="text-xs text-slate-500 font-mono mt-0.5">ID: ${esc(p.username)}</p>
+                    </div>
+                    ${
+                      p.role === "asisten"
+                        ? `<button type="button" data-del-assistant="${p.id}" class="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg" aria-label="Hapus asisten">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                           </button>`
+                        : ""
+                    }
+                  </div>
+
+                  ${
+                    p.role === "admin"
+                      ? `<label class="mt-3 flex items-center gap-2.5 text-xs text-slate-700 bg-slate-50 border border-slate-200/80 p-2.5 rounded-xl cursor-pointer select-none">
+                          <input type="checkbox" data-toggle-dual="${p.id}" ${p.is_asisten ? "checked" : ""} class="w-4 h-4 rounded accent-indigo-600" />
+                          <i data-lucide="shield" class="w-3.5 h-3.5 text-indigo-600 shrink-0"></i>
+                          <span class="font-medium">Aktifkan Dual-Role (Admin merangkap Asisten)</span>
+                         </label>`
+                      : ""
+                  }
+
+                  ${
+                    canAssign
+                      ? `<div class="mt-3 pt-3 border-t border-slate-100">
+                          <p class="text-[11px] font-semibold text-slate-500 mb-2">Pembagian Kelas yang Diampu:</p>
+                          <div class="flex flex-wrap gap-1.5">
+                            ${db.classes
+                              .map((c) => {
+                                const active = assignedIds.includes(c.id);
+                                return `
+                                  <button type="button" data-toggle-class="${p.id}::${c.id}" class="px-3 py-1.5 rounded-xl text-xs font-semibold border transition flex items-center gap-1 ${
+                                    active
+                                      ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                                  }">
+                                    <i data-lucide="${active ? "check" : "plus"}" class="w-3 h-3"></i>
+                                    ${esc(c.name)}
+                                  </button>
+                                `;
+                              })
+                              .join("")}
+                          </div>
+                         </div>`
+                      : `<p class="mt-2.5 text-[11px] text-slate-400 italic">Aktifkan Dual-Role di atas untuk menugaskan kelas ke akun Admin ini.</p>`
+                  }
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `;
+    }
+
+    // --- VIEW 8: PROFIL + WHATSAPP-STYLE GOOGLE DRIVE BACKUP PANEL ---
+    function renderProfilView(user) {
+      if (!user) {
+        return `
+          <div class="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+            <p class="text-sm text-slate-600 mb-4">Anda belum masuk ke akun Laboratorium Komputer.</p>
+            <button type="button" id="btn-profil-login-cta" class="px-5 py-2.5 bg-blue-600 text-white rounded-xl text-xs font-bold">
+              Masuk / Daftar Sekarang
+            </button>
+          </div>
+        `;
+      }
+
+      const roleLabel = getRoleLabel(user);
+      const classLabel = getUserClassLabel(user);
+      const cloudConnected = isCloudConfigured();
+
+      return `
+        <!-- Kartu Biodata Pengguna -->
+        <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+          <div class="flex items-center gap-3.5 pb-4 border-b border-slate-100">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center font-extrabold text-xl shadow-md shrink-0">
+              ${esc(user.full_name.charAt(0).toUpperCase())}
+            </div>
+            <div class="min-w-0">
+              <h2 class="font-extrabold text-base text-slate-900 truncate">${esc(user.full_name)}</h2>
+              <span class="inline-flex items-center gap-1 mt-1 text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                user.role === "admin"
+                  ? "bg-indigo-100 text-indigo-700"
+                  : user.role === "asisten"
+                  ? "bg-blue-100 text-blue-700"
+                  : "bg-emerald-100 text-emerald-700"
+              }">${esc(roleLabel)}</span>
+            </div>
+          </div>
+
+          <div class="mt-3.5 grid grid-cols-2 gap-3 text-xs">
+            <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+              <div class="text-[10px] text-slate-500">NIM / ID Username</div>
+              <div class="font-bold font-mono text-slate-900 mt-0.5 truncate">${esc(user.username)}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+              <div class="text-[10px] text-slate-500">${user.role === "praktikan" ? "Kelas Terdaftar" : "Kelas Diampu"}</div>
+              <div class="font-semibold text-slate-900 mt-0.5 truncate">${esc(classLabel)}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- WHATSAPP-STYLE "CADANGAN GOOGLE DRIVE" CARD                      -->
+        <!-- ================================================================ -->
+        <section class="mt-4 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <!-- Header Emerald WhatsApp-Style -->
+          <div class="px-4 py-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-white/15 backdrop-blur-sm flex items-center justify-center shrink-0">
+              <i data-lucide="cloud-upload" class="w-5 h-5 text-white"></i>
+            </div>
+            <div class="min-w-0">
+              <h3 class="font-bold text-sm leading-tight">Cadangan Google Drive</h3>
+              <p class="text-[11px] text-emerald-100 mt-0.5">Lokal otomatis tersinkron ke Google Drive</p>
+            </div>
+          </div>
+
+          <div class="p-4 space-y-4">
+            <!-- Status & Ringkasan Cadangan -->
+            <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-100 space-y-2 text-xs">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-slate-500">Status Koneksi</span>
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                  cloudConnected
+                    ? "bg-emerald-100 text-emerald-700"
+                    : "bg-slate-200 text-slate-700"
+                }">
+                  <span class="w-1.5 h-1.5 rounded-full ${cloudConnected ? "bg-emerald-500" : "bg-slate-500"}"></span>
+                  ${cloudConnected ? "Terhubung ke Google Drive" : "Mode Lokal"}
+                </span>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-slate-500">Terakhir dicadangkan (Lokal)</span>
+                <span class="font-semibold text-slate-800">${formatDate(backupCfg.lastLocalBackupAt, true)}</span>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-slate-500">Terakhir dicadangkan (Drive)</span>
+                <span class="font-semibold text-slate-800">${backupCfg.lastCloudBackupAt ? formatDate(backupCfg.lastCloudBackupAt, true) : "Belum dicadangkan"}</span>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-slate-500">Ukuran cadangan</span>
+                <span class="font-mono font-semibold text-slate-800">${formatBytes(backupCfg.lastBackupSizeBytes)}</span>
+              </div>
+            </div>
+
+            <!-- Tombol Utama WhatsApp-Style: Cadangkan Sekarang -->
+            <div>
+              <button type="button" id="btn-backup-now" ${ui.isBackingUp ? "disabled" : ""} class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-65 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md shadow-emerald-600/20 transition">
+                <i data-lucide="${ui.isBackingUp ? "loader-2" : "cloud-upload"}" class="w-4 h-4 ${ui.isBackingUp ? "animate-spin" : ""}"></i>
+                <span>${ui.isBackingUp ? (ui.backupProgressText || "Mencadangkan...") : "Cadangkan Sekarang"}</span>
+              </button>
+            </div>
+
+            <!-- Pengaturan Frekuensi Cadangan Otomatis -->
+            <div class="pt-3 border-t border-slate-100 space-y-3">
+              <div>
+                <label class="flex items-center gap-1.5 text-xs font-bold text-slate-800 mb-1.5">
+                  <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-emerald-600"></i>
+                  Frekuensi Cadangan Otomatis
+                </label>
+                <select id="sel-backup-freq" class="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-600">
+                  <option value="realtime" ${backupCfg.frequency === "realtime" ? "selected" : ""}>Otomatis setiap ada perubahan (debounce 4 dtk)</option>
+                  <option value="daily" ${backupCfg.frequency === "daily" ? "selected" : ""}>Harian</option>
+                  <option value="weekly" ${backupCfg.frequency === "weekly" ? "selected" : ""}>Mingguan</option>
+                  <option value="manual" ${backupCfg.frequency === "manual" ? "selected" : ""}>Hanya saat saya ketuk "Cadangkan"</option>
+                </select>
+              </div>
+
+              <!-- Pengaturan Endpoint Google Apps Script -->
+              <div class="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div class="min-w-0">
+                  <div class="text-xs font-bold text-slate-800">Endpoint Google Apps Script</div>
+                  <div class="text-[11px] text-slate-500 truncate mt-0.5">
+                    ${cloudConnected ? esc(gasUrl) : "Belum terhubung (berjalan di Mode Lokal)"}
+                  </div>
+                </div>
+                <button type="button" id="btn-config-gas" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold shrink-0">
+                  Atur / Hubungkan
+                </button>
+              </div>
+
+              <!-- Tombol Pulihkan dari Google Drive -->
+              <div class="grid grid-cols-1 gap-2">
+                <button type="button" id="btn-restore-drive" class="w-full py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold flex items-center justify-center gap-1.5 transition">
+                  <i data-lucide="cloud-download" class="w-4 h-4"></i>
+                  <span>${cloudConnected ? "Pulihkan dari Google Drive" : "Pulihkan dari Snapshot Terakhir"}</span>
+                </button>
+
+                ${
+                  cloudConnected
+                    ? `<button type="button" id="btn-sync-now" class="w-full py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5">
+                        <i data-lucide="refresh-ccw" class="w-3.5 h-3.5"></i> Tarik Pembaruan Data Terbaru
+                       </button>`
+                    : `<div class="grid grid-cols-2 gap-2 pt-1">
+                        <button type="button" id="btn-export-json" class="py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5">
+                          <i data-lucide="download" class="w-3.5 h-3.5"></i> Ekspor JSON
+                        </button>
+                        <label class="py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer">
+                          <i data-lucide="upload" class="w-3.5 h-3.5"></i> Impor JSON
+                          <input id="inp-import-json" type="file" accept=".json,application/json" class="hidden" />
+                        </label>
+                       </div>`
+                }
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Reset Lokal (Mode Demo) -->
+        ${
+          !cloudConnected
+            ? `<div class="mt-3 text-center">
+                <button type="button" id="btn-reset-demo-profil" class="text-[11px] text-slate-500 hover:text-rose-600 underline">
+                  Reset Data Demo Lokal ke Kondisi Awal
+                </button>
+               </div>`
+            : ""
+        }
+      `;
+    }
+
+    // ========================================================================
+    // 13. EVENT BINDING SEMUA HALAMAN
+    // ========================================================================
+    function bindAppEvents(user) {
+      // Bottom Nav & navigasi cepat
+      document.querySelectorAll("[data-nav]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          ui.activeTab = btn.getAttribute("data-nav");
+          ui.articleDetailId = null;
+          render();
+        });
+      });
+
+      // Klik status sync di Header -> buka Profil / sinkron cepat
+      document.getElementById("btn-header-sync-info")?.addEventListener("click", () => {
+        if (isCloudSession() && navigator.onLine) {
+          syncFromCloud(false);
+        } else {
+          ui.activeTab = "profil";
+          ui.articleDetailId = null;
+          render();
+        }
+      });
+
+      document.getElementById("btn-back-artikel")?.addEventListener("click", () => {
+        ui.articleDetailId = null;
+        render();
+      });
+
+      document.getElementById("btn-logout-trigger")?.addEventListener("click", () => {
+        openConfirm({
+          title: "Konfirmasi Logout",
+          message: "Apakah Anda yakin ingin keluar dari akun Laboratorium Komputer?",
+          confirmLabel: "Ya, Logout",
+          danger: true,
+          onConfirm: () => {
+            persistSession(null);
+            ui.activeTab = "artikel";
+            ui.articleDetailId = null;
+            updateSyncIndicator();
+            showToast("Anda berhasil keluar dari akun.", "info");
+            render();
+          }
+        });
+      });
+
+      document.getElementById("btn-goto-login")?.addEventListener("click", () => {
+        ui.activeTab = "artikel";
+        render();
+      });
+      document.getElementById("btn-profil-login-cta")?.addEventListener("click", () => {
+        ui.activeTab = "artikel";
+        render();
+      });
+
+      // --- ARTIKEL ---
+      const searchInp = document.getElementById("inp-article-search");
+      if (searchInp) {
+        searchInp.addEventListener("input", (e) => {
+          const val = e.target.value;
+          clearTimeout(searchDebounceTimer);
+          searchDebounceTimer = setTimeout(() => {
+            ui.articleSearch = val;
+            render();
+            const restored = document.getElementById("inp-article-search");
+            if (restored) {
+              restored.focus();
+              restored.setSelectionRange(val.length, val.length);
+            }
+          }, 300);
+        });
+      }
+
+      document.getElementById("btn-sort-article")?.addEventListener("click", () => {
+        ui.articleSort = ui.articleSort === "desc" ? "asc" : "desc";
+        render();
+      });
+
+      document.querySelectorAll("[data-open-article]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          ui.articleDetailId = btn.getAttribute("data-open-article");
+          render();
+        });
+      });
+
+      document.getElementById("btn-new-article")?.addEventListener("click", () => openNewArticleModal(user));
+
+      document.querySelectorAll("[data-del-article]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-del-article");
+          openConfirm({
+            title: "Hapus Artikel?",
+            message: "Artikel beserta seluruh komentar dan suka akan dihapus permanen.",
+            confirmLabel: "Hapus",
+            onConfirm: async () => {
+              if (isCloudSession()) {
+                const res = await callGas("deleteArticle", { id });
+                if (!res.ok) {
+                  showToast(res.error || "Gagal menghapus artikel di Drive.", "error");
+                  return;
+                }
+              }
+              db.articles = db.articles.filter((a) => a.id !== id);
+              db.likes = db.likes.filter((l) => l.article_id !== id);
+              db.comments = db.comments.filter((c) => c.article_id !== id);
+              persistState(true);
+              showToast("Artikel berhasil dihapus.", "success");
+              render();
+            }
+          });
+        });
+      });
+
+      document.getElementById("btn-like-article")?.addEventListener("click", async () => {
+        const articleId = ui.articleDetailId;
+        const idx = db.likes.findIndex((l) => l.article_id === articleId && l.user_id === user.id);
+        if (idx >= 0) db.likes.splice(idx, 1);
+        else db.likes.push({ article_id: articleId, user_id: user.id });
+        persistState(true);
+        render();
+
+        if (isCloudSession()) {
+          const res = await callGas("toggleLike", { article_id: articleId });
+          if (!res.ok && !res.isNetworkError) showToast(res.error || "Gagal menyimpan Like.", "error");
+        }
+      });
+
+      document.getElementById("btn-share-article")?.addEventListener("click", async () => {
+        const art = db.articles.find((a) => a.id === ui.articleDetailId);
+        const shareUrl = `${window.location.origin}${window.location.pathname}#artikel-${ui.articleDetailId}`;
+        if (navigator.share) {
+          try {
+            await navigator.share({ title: art?.title || "Artikel Labkom", url: shareUrl });
+            return;
+          } catch {}
+        }
+        copyTextSafe(shareUrl);
+        showToast("Link artikel berhasil disalin ke clipboard!", "success");
+      });
+
+      document.getElementById("form-comment")?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const inp = document.getElementById("inp-comment");
+        const content = inp.value.trim();
+        if (!content) return;
+
+        const newCmt = {
+          id: uid("cmt"),
+          article_id: ui.articleDetailId,
+          user_id: user.id,
+          content,
+          created_at: new Date().toISOString()
+        };
+
+        if (isCloudSession()) {
+          const res = await callGas("addComment", { article_id: ui.articleDetailId, content });
+          if (!res.ok) {
+            showToast(res.error || "Gagal mengirim komentar.", "error");
+            return;
+          }
+          if (res.data?.comment) Object.assign(newCmt, res.data.comment);
+        }
+
+        db.comments.push(newCmt);
+        persistState(true);
+        render();
+      });
+
+      // --- PENGUMUMAN ---
+      document.querySelectorAll("[data-ann-tab]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          ui.announcementTab = btn.getAttribute("data-ann-tab");
+          render();
+        });
+      });
+
+      document.getElementById("btn-new-announcement")?.addEventListener("click", () => openNewAnnouncementModal(user));
+
+      document.querySelectorAll("[data-del-ann]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-del-ann");
+          openConfirm({
+            title: "Hapus Pengumuman?",
+            message: "Pengumuman ini tidak akan tampil lagi di daftar.",
+            confirmLabel: "Hapus",
+            onConfirm: async () => {
+              if (isCloudSession()) {
+                const res = await callGas("deleteAnnouncement", { id });
+                if (!res.ok) {
+                  showToast(res.error || "Gagal menghapus pengumuman.", "error");
+                  return;
+                }
+              }
+              db.announcements = db.announcements.filter((a) => a.id !== id);
+              persistState(true);
+              showToast("Pengumuman berhasil dihapus.", "success");
+              render();
+            }
+          });
+        });
+      });
+
+      // --- TUGAS ---
+      document.getElementById("btn-new-assignment")?.addEventListener("click", () => openNewAssignmentModal(user));
+
+      document.querySelectorAll("[data-dl-material]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const asg = db.assignments.find((a) => a.id === btn.getAttribute("data-dl-material"));
+          if (!asg) return;
+          handleFileDownload({
+            fileId: asg.file_id || ("local-mat-" + asg.id),
+            kind: "material",
+            fileName: asg.file_name,
+            fallbackContent: asg.file_content,
+            localBase64: asg.file_base64,
+            localMime: asg.file_mime
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-dl-sub]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const sub = db.submissions.find((s) => s.id === btn.getAttribute("data-dl-sub"));
+          if (!sub) return;
+          handleFileDownload({
+            fileId: sub.file_id || ("local-sub-" + sub.id),
+            kind: "submission",
+            fileName: sub.file_name,
+            fallbackContent: sub.file_content,
+            localBase64: sub.file_base64,
+            localMime: sub.file_mime
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-upload-sub]").forEach((inp) => {
+        inp.addEventListener("change", async (e) => {
+          const file = e.target.files?.[0];
+          const asgId = inp.getAttribute("data-upload-sub");
+          e.target.value = "";
+          if (!file) return;
+
+          const err = validateFile(file);
+          if (err) {
+            showToast(err, "error");
+            return;
+          }
+
+          showToast("Mengunggah tugas...", "info");
+          let fileBase64 = "";
+          try {
+            if (isCloudSession() || file.size <= 1.5 * 1024 * 1024) {
+              fileBase64 = await readFileAsBase64(file);
+            }
+          } catch (readErr) {
+            showToast(readErr.message, "error");
+            return;
+          }
+
+          let remoteSub = null;
+          if (isCloudSession()) {
+            const res = await callGas("submitAssignment", {
+              assignment_id: asgId,
+              file_name: file.name,
+              file_mime: file.type || "application/octet-stream",
+              file_base64: fileBase64,
+              file_size: file.size
+            });
+            if (!res.ok) {
+              showToast(res.error || "Gagal mengunggah tugas ke Google Drive.", "error");
+              return;
+            }
+            remoteSub = res.data?.submission || null;
+          }
+
+          let existing = db.submissions.find((s) => s.assignment_id === asgId && s.student_id === user.id);
+          if (existing) {
+            existing.file_name = remoteSub?.file_name || file.name;
+            existing.file_size = remoteSub?.file_size || file.size;
+            existing.file_id = remoteSub?.file_id || existing.file_id || ("local-sub-" + existing.id);
+            existing.file_mime = file.type || "application/octet-stream";
+            existing.file_base64 = !isCloudSession() && file.size <= 1.5 * 1024 * 1024 ? fileBase64 : undefined;
+            existing.submitted_at = remoteSub?.submitted_at || new Date().toISOString();
+            runtimeBlobStore.set(existing.file_id, file);
+          } else {
+            const newId = remoteSub?.id || uid("sub");
+            const fileId = remoteSub?.file_id || ("local-sub-" + newId);
+            const newSub = {
+              id: newId,
+              assignment_id: asgId,
+              student_id: user.id,
+              file_id: fileId,
+              file_name: remoteSub?.file_name || file.name,
+              file_size: remoteSub?.file_size || file.size,
+              file_mime: file.type || "application/octet-stream",
+              file_base64: !isCloudSession() && file.size <= 1.5 * 1024 * 1024 ? fileBase64 : undefined,
+              file_content: `File unggahan praktikan: ${file.name} (${formatBytes(file.size)}) oleh ${user.full_name}`,
+              submitted_at: remoteSub?.submitted_at || new Date().toISOString()
+            };
+            db.submissions.push(newSub);
+            runtimeBlobStore.set(fileId, file);
+          }
+
+          persistState(true);
+          showToast("Tugas berhasil dikumpulkan!", "success");
+          render();
+        });
+      });
+
+      // --- KELAS ---
+      document.getElementById("sel-kelas-asisten")?.addEventListener("change", (e) => {
+        ui.selectedKelasId = e.target.value;
+        render();
+      });
+
+      document.getElementById("btn-add-student")?.addEventListener("click", openAddStudentModal);
+
+      document.querySelectorAll("[data-remove-student]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const stId = btn.getAttribute("data-remove-student");
+          const st = db.users.find((u) => u.id === stId);
+          openConfirm({
+            title: "Keluarkan Praktikan?",
+            message: `Keluarkan ${st ? st.full_name : "praktikan ini"} dari kelas ini?`,
+            confirmLabel: "Keluarkan",
+            onConfirm: async () => {
+              if (isCloudSession()) {
+                const res = await callGas("removeStudent", { class_id: ui.selectedKelasId, student_id: stId });
+                if (!res.ok) {
+                  showToast(res.error || "Gagal mengeluarkan praktikan.", "error");
+                  return;
+                }
+              }
+              db.enrollments = db.enrollments.filter(
+                (en) => !(en.class_id === ui.selectedKelasId && en.student_id === stId)
+              );
+              persistState(true);
+              showToast("Praktikan dikeluarkan dari kelas.", "info");
+              render();
+            }
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-open-student]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          openStudentDetailModal(btn.getAttribute("data-open-student"), ui.selectedKelasId);
+        });
+      });
+
+      // --- NILAI ---
+      document.getElementById("btn-dualrole-kelas")?.addEventListener("click", () => {
+        ui.activeTab = "kelas";
+        render();
+      });
+
+      document.getElementById("sel-kelas-nilai")?.addEventListener("change", (e) => {
+        ui.selectedNilaiClassId = e.target.value;
+        render();
+      });
+
+      document.getElementById("btn-export-xlsx")?.addEventListener("click", () => {
+        exportExcel(buildGradeMatrix(ui.selectedNilaiClassId));
+      });
+      document.getElementById("btn-export-docx")?.addEventListener("click", () => {
+        exportWord(buildGradeMatrix(ui.selectedNilaiClassId));
+      });
+      document.getElementById("btn-export-pdf")?.addEventListener("click", () => {
+        exportPdf(buildGradeMatrix(ui.selectedNilaiClassId));
+      });
+
+      // --- ASISTEN ---
+      document.getElementById("btn-add-assistant")?.addEventListener("click", openAddAssistantModal);
+
+      document.querySelectorAll("[data-toggle-dual]").forEach((chk) => {
+        chk.addEventListener("change", async () => {
+          const targetId = chk.getAttribute("data-toggle-dual");
+          const target = db.users.find((u) => u.id === targetId);
+          if (!target) return;
+          const nextVal = chk.checked;
+
+          if (isCloudSession()) {
+            const res = await callGas("toggleDualRole", { user_id: targetId, is_asisten: nextVal });
+            if (!res.ok) {
+              chk.checked = !nextVal;
+              showToast(res.error || "Gagal memperbarui Dual-Role.", "error");
+              return;
+            }
+          }
+          target.is_asisten = nextVal;
+          if (session?.user?.id === targetId) {
+            session.user.is_asisten = nextVal;
+            persistSession(session);
+          }
+          persistState(true);
+          showToast(`${target.full_name}: Dual-Role ${nextVal ? "diaktifkan" : "dinonaktifkan"}.`, "success");
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-toggle-class]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const [asstId, clsId] = btn.getAttribute("data-toggle-class").split("::");
+          if (isCloudSession()) {
+            const res = await callGas("toggleClassAssistant", { assistant_id: asstId, class_id: clsId });
+            if (!res.ok) {
+              showToast(res.error || "Gagal mengubah pembagian kelas.", "error");
+              return;
+            }
+          }
+          const idx = db.class_assistants.findIndex((ca) => ca.assistant_id === asstId && ca.class_id === clsId);
+          if (idx >= 0) db.class_assistants.splice(idx, 1);
+          else db.class_assistants.push({ id: uid("ca"), assistant_id: asstId, class_id: clsId });
+          persistState(true);
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-del-assistant]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const asstId = btn.getAttribute("data-del-assistant");
+          const target = db.users.find((u) => u.id === asstId);
+          openConfirm({
+            title: "Hapus Akun Asisten?",
+            message: `Hapus asisten "${target ? target.full_name : ""}" dari sistem?`,
+            confirmLabel: "Hapus",
+            onConfirm: async () => {
+              if (isCloudSession()) {
+                const res = await callGas("deleteAssistant", { user_id: asstId });
+                if (!res.ok) {
+                  showToast(res.error || "Gagal menghapus asisten.", "error");
+                  return;
+                }
+              }
+              db.users = db.users.filter((u) => u.id !== asstId);
+              db.class_assistants = db.class_assistants.filter((ca) => ca.assistant_id !== asstId);
+              persistState(true);
+              showToast("Asisten berhasil dihapus.", "success");
+              render();
+            }
+          });
+        });
+      });
+
+      // --- PROFIL & WHATSAPP-STYLE BACKUP ---
+      document.getElementById("btn-backup-now")?.addEventListener("click", () => {
+        performBackup({ reason: "manual", silent: false });
+      });
+
+      document.getElementById("sel-backup-freq")?.addEventListener("change", (e) => {
+        backupCfg.frequency = e.target.value;
+        persistBackupCfg();
+        const labels = {
+          realtime: "Otomatis setiap perubahan (debounce 4 dtk)",
+          daily: "Harian",
+          weekly: "Mingguan",
+          manual: "Manual saja"
+        };
+        showToast(`Frekuensi cadangan diubah: ${labels[backupCfg.frequency]}`, "success");
+      });
+
+      document.getElementById("btn-config-gas")?.addEventListener("click", openGasSettingsModal);
+
+      document.getElementById("btn-restore-drive")?.addEventListener("click", () => {
+        openConfirm({
+          title: isCloudConfigured() ? "Pulihkan dari Google Drive?" : "Pulihkan Snapshot Lokal?",
+          message: isCloudConfigured()
+            ? "Data cache lokal akan ditimpa dengan cadangan terbaru dari Google Drive Anda."
+            : "Data lokal saat ini akan dikembalikan ke snapshot cadangan terakhir.",
+          confirmLabel: "Ya, Pulihkan",
+          danger: false,
+          onConfirm: performRestoreFromDrive
+        });
+      });
+
+      document.getElementById("btn-sync-now")?.addEventListener("click", () => syncFromCloud(false));
+
+      document.getElementById("btn-export-json")?.addEventListener("click", () => {
+        const payload = {
+          app: "Laboratorium Komputer (Labkom)",
+          version: 2,
+          exportedAt: new Date().toISOString(),
+          state: db
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const dateTag = new Date().toISOString().slice(0, 10);
+        triggerBlobDownload(blob, `labkom_backup_${dateTag}.json`);
+        showToast("File cadangan JSON berhasil diunduh!", "success");
+      });
+
+      document.getElementById("inp-import-json")?.addEventListener("change", (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const parsed = JSON.parse(String(reader.result || ""));
+            const nextState = parsed.state || parsed;
+            if (!nextState || !Array.isArray(nextState.users) || !Array.isArray(nextState.classes)) {
+              showToast("Format file JSON cadangan tidak valid.", "error");
+              return;
+            }
+            openConfirm({
+              title: "Impor Cadangan JSON?",
+              message: `Muat data dari "${file.name}" dan ganti data lokal saat ini?`,
+              confirmLabel: "Ya, Impor",
+              danger: false,
+              onConfirm: () => {
+                db = nextState;
+                persistState(false);
+                showToast("Cadangan JSON berhasil diimpor & dipulihkan!", "success");
+                render();
+              }
+            });
+          } catch {
+            showToast("Gagal membaca file JSON.", "error");
+          }
+        };
+        reader.readAsText(file);
+      });
+
+      document.getElementById("btn-reset-demo-profil")?.addEventListener("click", confirmResetLocalData);
+    }
+
+    // ========================================================================
+    // 14. MODAL FORMS (ARTIKEL, PENGUMUMAN, TUGAS, PRAKTIKAN, NILAI, ASISTEN, GAS)
+    // ========================================================================
+    function openGasSettingsModal() {
+      const connected = isCloudConfigured();
+      openModal(
+        "Pengaturan Google Apps Script (Drive)",
+        `<div class="space-y-3.5 text-xs">
+          <p class="text-slate-600 leading-relaxed">
+            Masukkan URL Web App dari <strong>Google Apps Script (Code.gs)</strong> Anda untuk menyalakan sinkronisasi multi-user & auto-backup Google Drive.
+          </p>
+          <div>
+            <label class="block font-bold text-slate-700 mb-1">Web App URL</label>
+            <input id="modal-gas-url" type="url" value="${esc(gasUrl)}" placeholder="https://script.google.com/macros/s/.../exec" class="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-600" />
+          </div>
+          <div id="modal-gas-feedback" class="hidden p-2.5 rounded-xl text-[11px]"></div>
+          <div class="flex gap-2">
+            <button type="button" id="modal-gas-test" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5">
+              <i data-lucide="plug-zap" class="w-4 h-4"></i> Tes & Simpan
+            </button>
+            ${
+              connected
+                ? `<button type="button" id="modal-gas-disconnect" class="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl font-bold">Putuskan</button>`
+                : ""
+            }
+          </div>
+          <p class="text-[11px] text-slate-400">
+            Catatan: Saat beralih dari Mode Lokal ke Cloud (atau sebaliknya), silakan login ulang menggunakan akun di server tujuan agar token sesi sinkron.
+          </p>
+        </div>`
+      );
+
+      document.getElementById("modal-gas-test")?.addEventListener("click", async () => {
+        const url = document.getElementById("modal-gas-url").value.trim();
+        const fb = document.getElementById("modal-gas-feedback");
+        if (!/^https?:\/\//i.test(url)) {
+          fb.className = "p-2.5 rounded-xl text-[11px] bg-rose-50 text-rose-700 border border-rose-200";
+          fb.textContent = "URL harus diawali https://";
+          fb.classList.remove("hidden");
+          return;
+        }
+        fb.className = "p-2.5 rounded-xl text-[11px] bg-blue-50 text-blue-700 border border-blue-200";
+        fb.textContent = "Menghubungi Google Apps Script (ping)...";
+        fb.classList.remove("hidden");
+
+        const res = await callGas("ping", {}, url);
+        if (res.ok) {
+          persistGasUrl(url);
+          closeModal();
+          showToast("Berhasil terhubung ke Google Drive (Apps Script)!", "success");
+          render();
+        } else {
+          fb.className = "p-2.5 rounded-xl text-[11px] bg-rose-50 text-rose-700 border border-rose-200";
+          fb.textContent = res.error || "Koneksi gagal.";
+        }
+      });
+
+      document.getElementById("modal-gas-disconnect")?.addEventListener("click", () => {
+        persistGasUrl("");
+        if (session && session.mode === "cloud") {
+          persistSession(null);
+        }
+        closeModal();
+        showToast("Koneksi Google Apps Script diputus. Kembali ke Mode Lokal.", "info");
+        render();
+      });
+    }
+
+    function openNewArticleModal(user) {
+      openModal(
+        "Unggah Artikel Baru",
+        `<form id="form-new-article" class="space-y-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Judul Artikel</label>
+            <input id="art-title" type="text" required placeholder="Contoh: Tips Debugging Python" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Deskripsi Singkat</label>
+            <input id="art-excerpt" type="text" required placeholder="Ringkasan 1-2 kalimat..." class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Tema Sampul / URL Gambar Opsional</label>
+            <select id="art-theme" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm bg-white">
+              <option value="theme:blue">Biru — Modul & Panduan</option>
+              <option value="theme:emerald">Hijau — Basis Data & Sistem</option>
+              <option value="theme:indigo">Indigo — Info Praktikum</option>
+              <option value="theme:slate">Gelap — Keamanan Labkom</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Isi Lengkap Artikel</label>
+            <textarea id="art-content" rows="5" required placeholder="Tulis konten lengkap..." class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm"></textarea>
+          </div>
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm">Publikasikan Artikel</button>
+        </form>`
+      );
+
+      document.getElementById("form-new-article").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const payload = {
+          title: document.getElementById("art-title").value.trim(),
+          excerpt: document.getElementById("art-excerpt").value.trim(),
+          content: document.getElementById("art-content").value.trim(),
+          thumbnail_url: document.getElementById("art-theme").value
+        };
+
+        let remoteArt = null;
+        if (isCloudSession()) {
+          const res = await callGas("createArticle", payload);
+          if (!res.ok) {
+            showToast(res.error || "Gagal menyimpan artikel.", "error");
+            return;
+          }
+          remoteArt = res.data?.article || null;
+        }
+
+        db.articles.unshift(
+          remoteArt || {
+            id: uid("art"),
+            ...payload,
+            author_id: user.id,
+            created_at: new Date().toISOString()
+          }
+        );
+        persistState(true);
+        closeModal();
+        showToast("Artikel berhasil dipublikasikan!", "success");
+        render();
+      });
+    }
+
+    function openNewAnnouncementModal(user) {
+      const scope = ui.announcementTab;
+      const taught = getTaughtClasses(user.id);
+
+      openModal(
+        `Buat Pengumuman ${scope === "global" ? "Global" : "Asisten"}`,
+        `<form id="form-ann" class="space-y-3">
+          ${
+            scope === "asisten"
+              ? `<div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Target Kelas</label>
+                  <select id="ann-class" required class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm bg-white">
+                    ${taught.map((c) => `<option value="${c.id}">${esc(c.name)} — ${esc(c.course_name)}</option>`).join("")}
+                  </select>
+                 </div>`
+              : ""
+          }
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Judul</label>
+            <input id="ann-title" type="text" required placeholder="Judul pengumuman..." class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Isi Pengumuman</label>
+            <textarea id="ann-content" rows="4" required placeholder="Tulis pesan pengumuman..." class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm"></textarea>
+          </div>
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm">Kirim Pengumuman</button>
+        </form>`
+      );
+
+      document.getElementById("form-ann").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const payload = {
+          title: document.getElementById("ann-title").value.trim(),
+          content: document.getElementById("ann-content").value.trim(),
+          scope,
+          class_id: scope === "asisten" ? document.getElementById("ann-class").value : null
+        };
+
+        let remoteAnn = null;
+        if (isCloudSession()) {
+          const res = await callGas("createAnnouncement", payload);
+          if (!res.ok) {
+            showToast(res.error || "Gagal membuat pengumuman.", "error");
+            return;
+          }
+          remoteAnn = res.data?.announcement || null;
+        }
+
+        db.announcements.unshift(
+          remoteAnn || {
+            id: uid("ann"),
+            ...payload,
+            author_id: user.id,
+            created_at: new Date().toISOString()
+          }
+        );
+        persistState(true);
+        closeModal();
+        showToast("Pengumuman berhasil dikirim!", "success");
+        render();
+      });
+    }
+
+    function openNewAssignmentModal(user) {
+      const nowLocal = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      openModal(
+        "Buat & Jadwalkan Tugas",
+        `<form id="form-asg" class="space-y-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Target Kelas</label>
+            <select id="asg-class" required class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm bg-white">
+              ${db.classes.map((c) => `<option value="${c.id}">${esc(c.name)} — ${esc(c.course_name)}</option>`).join("")}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Judul Tugas</label>
+            <input id="asg-title" type="text" required placeholder="Contoh: Modul 4 - Struktur Data" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Deskripsi & Instruksi</label>
+            <textarea id="asg-desc" rows="3" required placeholder="Petunjuk pengerjaan tugas..." class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm"></textarea>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Jadwal Rilis Otomatis</label>
+            <input id="asg-release" type="datetime-local" required value="${nowLocal}" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+            <p class="text-[10px] text-slate-400 mt-0.5">Tugas bertanggal masa depan otomatis tersembunyi dari Praktikan.</p>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Tenggat Pengumpulan (Opsional)</label>
+            <input id="asg-due" type="datetime-local" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">File Soal / Modul Opsional (Maks 5 MB)</label>
+            <input id="asg-file" type="file" accept="${ALLOWED_EXT.join(",")}" class="text-xs w-full" />
+          </div>
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm">Jadwalkan Tugas</button>
+        </form>`
+      );
+
+      document.getElementById("form-asg").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const file = document.getElementById("asg-file").files?.[0];
+        if (file) {
+          const err = validateFile(file);
+          if (err) {
+            showToast(err, "error");
+            return;
+          }
+        }
+
+        let fileBase64 = "";
+        if (file && (isCloudSession() || file.size <= 1.5 * 1024 * 1024)) {
+          fileBase64 = await readFileAsBase64(file);
+        }
+
+        const dueRaw = document.getElementById("asg-due").value;
+        const payload = {
+          class_id: document.getElementById("asg-class").value,
+          title: document.getElementById("asg-title").value.trim(),
+          description: document.getElementById("asg-desc").value.trim(),
+          release_at: new Date(document.getElementById("asg-release").value).toISOString(),
+          due_at: dueRaw ? new Date(dueRaw).toISOString() : null,
+          file_name: file ? file.name : null,
+          file_mime: file ? (file.type || "application/octet-stream") : null,
+          file_base64: fileBase64 || null
+        };
+
+        let remoteAsg = null;
+        if (isCloudSession()) {
+          const res = await callGas("createAssignment", payload);
+          if (!res.ok) {
+            showToast(res.error || "Gagal menjadwalkan tugas.", "error");
+            return;
+          }
+          remoteAsg = res.data?.assignment || null;
+        }
+
+        const newId = remoteAsg?.id || uid("asg");
+        const fileId = remoteAsg?.file_id || (file ? "local-mat-" + newId : null);
+        if (file && fileId) runtimeBlobStore.set(fileId, file);
+
+        db.assignments.unshift(
+          remoteAsg || {
+            id: newId,
+            class_id: payload.class_id,
+            title: payload.title,
+            description: payload.description,
+            file_id: fileId,
+            file_name: payload.file_name,
+            file_mime: payload.file_mime,
+            file_base64: !isCloudSession() && file && file.size <= 1.5 * 1024 * 1024 ? fileBase64 : undefined,
+            file_content: `Modul Tugas: ${payload.title}\n\n${payload.description}`,
+            release_at: payload.release_at,
+            due_at: payload.due_at,
+            created_by: user.id,
+            created_at: new Date().toISOString()
+          }
+        );
+
+        persistState(true);
+        closeModal();
+        showToast("Tugas berhasil dijadwalkan!", "success");
+        render();
+      });
+    }
+
+    function openAddStudentModal() {
+      openModal(
+        "Tambah Praktikan ke Kelas",
+        `<form id="form-add-student" class="space-y-3">
+          <p class="text-xs text-slate-500">Masukkan NIM / Username praktikan yang sudah terdaftar di Labkom.</p>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">NIM / Username</label>
+            <input id="st-nim" type="text" required placeholder="Contoh: 2401003" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          ${
+            !isCloudSession()
+              ? `<div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Nama Lengkap (Opsional jika buat akun lokal baru)</label>
+                  <input id="st-name" type="text" placeholder="Contoh: Reza Mahendra" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+                 </div>`
+              : ""
+          }
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm">Tambahkan Praktikan</button>
+        </form>`
+      );
+
+      document.getElementById("form-add-student").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const nim = document.getElementById("st-nim").value.trim().toLowerCase().replace(/\s+/g, "");
+
+        if (isCloudSession()) {
+          const res = await callGas("enrollStudent", { class_id: ui.selectedKelasId, username: nim });
+          if (!res.ok) {
+            showToast(res.error || "Gagal menambahkan praktikan.", "error");
+            return;
+          }
+          closeModal();
+          showToast("Praktikan berhasil ditambahkan!", "success");
+          await syncFromCloud(true);
+          return;
+        }
+
+        const name = (document.getElementById("st-name")?.value || "").trim();
+        let target = db.users.find((u) => u.username === nim);
+        if (!target) {
+          if (!name) {
+            showToast(`NIM "${nim}" tidak ditemukan. Isi Nama Lengkap untuk membuat akun lokal.`, "error");
+            return;
+          }
+          target = {
+            id: uid("u"),
+            username: nim,
+            password: "123456",
+            full_name: name,
+            role: "praktikan",
+            is_asisten: false,
+            created_at: new Date().toISOString()
+          };
+          db.users.push(target);
+        }
+
+        if (db.enrollments.some((en) => en.class_id === ui.selectedKelasId && en.student_id === target.id)) {
+          showToast("Praktikan sudah terdaftar di kelas ini.", "info");
+          return;
+        }
+
+        db.enrollments.push({ id: uid("en"), class_id: ui.selectedKelasId, student_id: target.id });
+        persistState(true);
+        closeModal();
+        showToast(`${target.full_name} ditambahkan ke kelas!`, "success");
+        render();
+      });
+    }
+
+    function openStudentDetailModal(studentId, classId) {
+      const st = db.users.find((u) => u.id === studentId);
+      const cls = db.classes.find((c) => c.id === classId);
+      if (!st) return;
+
+      const classAsgs = db.assignments.filter((a) => a.class_id === classId);
+      const subs = db.submissions.filter(
+        (s) => s.student_id === studentId && classAsgs.some((a) => a.id === s.assignment_id)
+      );
+
+      const listHtml =
+        subs.length === 0
+          ? `<div class="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-100">
+              Praktikan ini belum mengumpulkan tugas di kelas ${esc(cls?.name || "")}.
+             </div>`
+          : `<div class="space-y-3">
+              ${subs
+                .map((sub) => {
+                  const asg = classAsgs.find((a) => a.id === sub.assignment_id);
+                  const existingGrade = db.grades.find((g) => g.submission_id === sub.id);
+                  return `
+                    <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                      <div class="font-bold text-xs text-slate-900">${esc(asg ? asg.title : "Tugas")}</div>
+                      <div class="text-[10px] text-slate-500 mt-0.5">Dikumpulkan: ${formatDate(sub.submitted_at, true)}</div>
+                      <button type="button" data-modal-dl-sub="${sub.id}" class="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:underline bg-white px-2.5 py-1.5 rounded-lg border border-blue-100">
+                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                        <span class="truncate max-w-[210px]">${esc(sub.file_name)}</span>
+                      </button>
+
+                      <div class="mt-2.5 flex items-center gap-2">
+                        <input type="number" min="0" max="100" step="0.5" data-score-input="${sub.id}" value="${existingGrade !== undefined ? existingGrade.score : ""}" placeholder="Nilai (0-100)" class="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                        <button type="button" data-save-grade="${sub.id}" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1">
+                          <i data-lucide="save" class="w-3.5 h-3.5"></i> Simpan
+                        </button>
+                      </div>
+                      <input type="text" data-feedback-input="${sub.id}" value="${esc(existingGrade?.feedback || "")}" placeholder="Catatan evaluasi internal (opsional)..." class="mt-2 w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                    </div>
+                  `;
+                })
+                .join("")}
+            </div>`;
+
+      openModal(
+        "Detail & Penilaian Praktikan",
+        `<div class="space-y-4">
+          <div class="flex items-center gap-3 p-3 rounded-xl bg-slate-900 text-white">
+            <div class="w-11 h-11 rounded-full bg-blue-600 flex items-center justify-center font-bold text-base shrink-0">
+              ${esc(st.full_name.charAt(0).toUpperCase())}
+            </div>
+            <div class="min-w-0">
+              <div class="font-bold text-sm truncate">${esc(st.full_name)}</div>
+              <div class="text-[11px] text-slate-300 font-mono">NIM: ${esc(st.username)} • ${esc(cls?.name || "")}</div>
+            </div>
+          </div>
+
+          <div class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-1.5">
+            <i data-lucide="lock" class="w-3.5 h-3.5 shrink-0"></i>
+            <span>Nilai tersinkron ke Rekap Nilai & <strong>tersembunyi mutlak</strong> dari akun Praktikan.</span>
+          </div>
+
+          ${listHtml}
+        </div>`
+      );
+
+      document.querySelectorAll("[data-modal-dl-sub]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const sub = db.submissions.find((s) => s.id === btn.getAttribute("data-modal-dl-sub"));
+          if (!sub) return;
+          handleFileDownload({
+            fileId: sub.file_id || ("local-sub-" + sub.id),
+            kind: "submission",
+            fileName: sub.file_name,
+            fallbackContent: sub.file_content,
+            localBase64: sub.file_base64,
+            localMime: sub.file_mime
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-save-grade]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const subId = btn.getAttribute("data-save-grade");
+          const scoreInp = document.querySelector(`[data-score-input="${subId}"]`);
+          const fbInp = document.querySelector(`[data-feedback-input="${subId}"]`);
+          const val = parseFloat(scoreInp.value);
+          const feedback = (fbInp?.value || "").trim();
+
+          if (isNaN(val) || val < 0 || val > 100) {
+            showToast("Masukkan angka nilai valid antara 0 hingga 100.", "error");
+            return;
+          }
+
+          if (isCloudSession()) {
+            const res = await callGas("saveGrade", { submission_id: subId, score: val, feedback });
+            if (!res.ok) {
+              showToast(res.error || "Gagal menyimpan nilai ke Drive.", "error");
+              return;
+            }
+          }
+
+          const sub = db.submissions.find((s) => s.id === subId);
+          if (!sub) return;
+          const existing = db.grades.find((g) => g.submission_id === subId);
+          if (existing) {
+            existing.score = val;
+            existing.feedback = feedback;
+            existing.updated_at = new Date().toISOString();
+          } else {
+            db.grades.push({
+              id: uid("grd"),
+              submission_id: subId,
+              assignment_id: sub.assignment_id,
+              student_id: studentId,
+              class_id: classId,
+              score: val,
+              feedback,
+              updated_at: new Date().toISOString()
+            });
+          }
+
+          persistState(true);
+          showToast(`Nilai ${val} tersimpan & otomatis masuk ke tabel Nilai!`, "success");
+          render();
+        });
+      });
+    }
+
+    function openAddAssistantModal() {
+      openModal(
+        "Tambah Asisten Baru",
+        `<form id="form-add-asst" class="space-y-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Nama Lengkap</label>
+            <input id="asst-name" type="text" required placeholder="Contoh: Bagas Saputra" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">ID / Username</label>
+            <input id="asst-user" type="text" required placeholder="Contoh: asisten2" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Password Awal (min. 6 karakter)</label>
+            <input id="asst-pass" type="password" required minlength="6" placeholder="Minimal 6 karakter" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+          </div>
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm">Simpan Asisten</button>
+        </form>`
+      );
+
+      document.getElementById("form-add-asst").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const username = document.getElementById("asst-user").value.trim().toLowerCase().replace(/\s+/g, "");
+        const full_name = document.getElementById("asst-name").value.trim();
+        const password = document.getElementById("asst-pass").value;
+
+        let remoteUser = null;
+        if (isCloudSession()) {
+          const res = await callGas("createAssistant", { username, full_name, password });
+          if (!res.ok) {
+            showToast(res.error || "Gagal menambah asisten.", "error");
+            return;
+          }
+          remoteUser = res.data?.user || null;
+        } else if (db.users.some((u) => u.username === username)) {
+          showToast("Username tersebut sudah digunakan.", "error");
+          return;
+        }
+
+        db.users.push(
+          remoteUser || {
+            id: uid("u"),
+            username,
+            password,
+            full_name,
+            role: "asisten",
+            is_asisten: true,
+            created_at: new Date().toISOString()
+          }
+        );
+        persistState(true);
+        closeModal();
+        showToast(`Asisten ${full_name} berhasil ditambahkan!`, "success");
+        render();
+      });
+    }
+
+    function confirmResetLocalData() {
+      openConfirm({
+        title: "Reset Data Lokal?",
+        message: "Seluruh data demo lokal dan snapshot akan dikembalikan ke kondisi awal.",
+        confirmLabel: "Ya, Reset",
+        danger: true,
+        onConfirm: () => {
+          localStorage.removeItem(STATE_KEY);
+          localStorage.removeItem(SESSION_KEY);
+          localStorage.removeItem(BACKUP_CFG_KEY);
+          localStorage.removeItem(LOCAL_SNAPSHOT_KEY);
+          runtimeBlobStore.clear();
+          session = null;
+          loadAllFromStorage();
+          ui.activeTab = "artikel";
+          ui.articleDetailId = null;
+          showToast("Data lokal berhasil dikembalikan ke kondisi awal.", "success");
+          render();
+        }
+      });
+    }
+
+    // ========================================================================
+    // 15. NETWORK LISTENERS & BOOTSTRAP APLIKASI
+    // ========================================================================
+    window.addEventListener("online", () => {
+      ui.isOffline = false;
+      updateSyncIndicator();
+      render();
+      if (isCloudSession()) {
+        syncFromCloud(true);
+      }
+    });
+
+    window.addEventListener("offline", () => {
+      ui.isOffline = true;
+      updateSyncIndicator("offline");
+      render();
+    });
+
+    // Jalankan Aplikasi
+    loadAllFromStorage();
+    render();
+    checkScheduledBackupOnStartup();
+    if (isCloudSession() && navigator.onLine) {
+      syncFromCloud(true);
+    }
+  })();
+  </script>
+</body>
+</html>
