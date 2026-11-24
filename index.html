@@ -327,6 +327,194 @@
       persistLocalDb();
     }
 
+    function saveSession(nextSess) {
+      session = nextSess;
+      try {
+        if (nextSess) localStorage.setItem(KEY_SESSION, JSON.stringify(nextSess));
+        else localStorage.removeItem(KEY_SESSION);
+      } catch (_e) {
+        // Abaikan jika localStorage penuh
+      }
+    }
+
+    function saveBackupCfg() {
+      try {
+        localStorage.setItem(KEY_BACKUP_CFG, JSON.stringify(backupCfg));
+      } catch (_e) {
+        // Abaikan
+      }
+    }
+
+    function saveSyncQueue() {
+      try {
+        localStorage.setItem(KEY_QUEUE, JSON.stringify(syncQueue));
+      } catch (_e) {
+        // Abaikan
+      }
+    }
+
+    function getLocalCacheSizeBytes() {
+      try {
+        return new Blob([localStorage.getItem(KEY_STATE) || "{}"]).size;
+      } catch (_e) {
+        return JSON.stringify(db).length;
+      }
+    }
+
+    // ========================================================================
+    // 4. GOOGLE APPS SCRIPT TRANSPORT & LIGHTWEIGHT SYNC (TIMEOUT 15s)
+    // ========================================================================
+    async function callGas(action, payload) {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        ui.isOffline = true;
+        updateLiveConnectionIndicators();
+        return { ok: false, isNetworkError: true, error: "Perangkat sedang offline." };
+      }
+
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS) : null;
+
+      try {
+        const res = await fetch(GAS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          redirect: "follow",
+          signal: controller ? controller.signal : undefined,
+          body: JSON.stringify({
+            action,
+            token: session && session.token ? session.token : "",
+            payload: payload || {}
+          })
+        });
+
+        if (timer) clearTimeout(timer);
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (_parseErr) {
+          return { ok: false, isNetworkError: true, error: "Respons server Google Drive tidak valid." };
+        }
+
+        ui.isOffline = false;
+        return data;
+      } catch (err) {
+        if (timer) clearTimeout(timer);
+        const isTimeout = err && err.name === "AbortError";
+        return {
+          ok: false,
+          isNetworkError: true,
+          isTimeout,
+          error: isTimeout ? "Koneksi timeout (15 detik)." : "Gagal terhubung ke jaringan."
+        };
+      }
+    }
+
+    function applyLightweightAck(action, payload, res) {
+      if (res.version) {
+        clientVersion = String(res.version);
+        try {
+          localStorage.setItem(KEY_VERSION, clientVersion);
+        } catch (_e) {
+          // Abaikan
+        }
+      }
+
+      // Ganti ID sementara (temp_*) dengan ID permanen dari file Google Drive
+      const replaceTempId = (arr, tempId, realId, extra) => {
+        if (!tempId || !realId || !Array.isArray(arr)) return;
+        const item = arr.find((x) => x.id === tempId);
+        if (item) {
+          item.id = realId;
+          if (extra) Object.assign(item, extra);
+        }
+        // Perbarui referensi tempId pada antrean sinkronisasi yang masih menunggu
+        syncQueue.forEach((q) => {
+          if (!q || !q.payload) return;
+          ["id", "articleId", "assignmentId", "classId", "submissionId", "userId", "assistantId"].forEach((k) => {
+            if (q.payload[k] === tempId) q.payload[k] = realId;
+          });
+        });
+        saveSyncQueue();
+      };
+
+      if (action === "createArticle") {
+        replaceTempId(db.articles, payload.tempId, res.id, res.thumbnail ? { thumbnail: res.thumbnail } : null);
+        if (ui.articleDetailId === payload.tempId && res.id) ui.articleDetailId = res.id;
+      } else if (action === "createAnnouncement") {
+        replaceTempId(db.announcements, payload.tempId, res.id);
+      } else if (action === "createClass") {
+        replaceTempId(db.classes, payload.tempId, res.id);
+        if (ui.selectedKelasId === payload.tempId && res.id) ui.selectedKelasId = res.id;
+        if (ui.selectedNilaiClassId === payload.tempId && res.id) ui.selectedNilaiClassId = res.id;
+      } else if (action === "createAssignment") {
+        replaceTempId(db.assignments, payload.tempId, res.id, {
+          fileUrl: res.fileUrl || null,
+          fileId: res.fileId || null
+        });
+      } else if (action === "submitAssignment") {
+        replaceTempId(db.submissions, payload.tempId, res.id, {
+          fileUrl: res.fileUrl || null,
+          fileId: res.fileId || null
+        });
+      } else if (action === "saveGrade") {
+        replaceTempId(db.grades, payload.tempId, res.id);
+      } else if (action === "createAssistant") {
+        replaceTempId(db.users, payload.tempId, res.id);
+      } else if (action === "addStudentToClass" && res.user) {
+        if (!db.users.some((u) => u.id === res.user.id)) {
+          db.users.push(res.user);
+        }
+        const cls = db.classes.find((c) => c.id === res.classId);
+        if (cls) {
+          cls.studentIds = Array.isArray(cls.studentIds) ? cls.studentIds : [];
+          if (!cls.studentIds.includes(res.user.id)) cls.studentIds.push(res.user.id);
+        }
+      }
+
+      persistLocalDb();
+    }
+
+    async function syncWithDrive(opts) {
+      const silent = opts && opts.silent !== undefined ? opts.silent : true;
+      const force = Boolean(opts && opts.force);
+      if (isSyncInFlight || !session) return;
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        ui.isOffline = true;
+        updateLiveConnectionIndicators();
+        if (!silent) showToast("Sedang offline. Menampilkan data tersimpan lokal.", "info");
+        return;
+      }
+
+      isSyncInFlight = true;
+      updateLiveConnectionIndicators();
+
+      const res = await callGas("sync", {
+        clientVersion: force ? "" : clientVersion,
+        force
+      });
+
+      isSyncInFlight = false;
+      updateLiveConnectionIndicators();
+
+      if (res && res.ok) {
+        lastSyncTimestamp = Date.now();
+        if (!res.unchanged && res.state) {
+          saveStateFromServer(res.state, res.serverTime || new Date().toISOString(), res.version);
+          const modalEl = document.getElementById("modal-root");
+          if (modalEl && modalEl.classList.contains("hidden")) {
+            render();
+          }
+        }
+        if (!silent) showToast("Data terbaru berhasil disinkronkan dari Google Drive!", "success");
+      } else if (res && res.isNetworkError) {
+        // JANGAN logout saat jaringan bermasalah
+        if (!silent) showToast("Jaringan lambat/terputus. Data lokal tetap aktif.", "info");
+      } else if (!silent) {
+        showToast((res && res.error) || "Gagal menyinkronkan data.", "error");
+      }
+    }
+
     function enqueueMutation(action, payload) {
       syncQueue.push({
         id: "q_" + Date.now() + "_" + Math.floor(Math.random() * 10000),
@@ -1767,29 +1955,38 @@
               return `
                 <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
                   <div class="flex items-start gap-3">
-                    <div class="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 flex items-center justify-center shrink-0">
+                    <div class="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
                       <i data-lucide="clipboard-list" class="w-5 h-5"></i>
                     </div>
                     <div class="flex-1 min-w-0">
-                      <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${esc(cls ? cls.name : "-")}</span>
+                      <div class="flex flex-wrap items-center justify-between gap-1.5">
+                        <div class="flex flex-wrap items-center gap-1.5">
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${esc(cls ? cls.name : "-")}</span>
+                          ${
+                            isFuture
+                              ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1">
+                                  <i data-lucide="calendar-clock" class="w-3 h-3"></i> Terjadwal
+                                 </span>`
+                              : ""
+                          }
+                          ${
+                            user.role === "praktikan"
+                              ? mySub
+                                ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-1">
+                                    <i data-lucide="check-circle-2" class="w-3 h-3"></i> Sudah Dikumpulkan
+                                   </span>`
+                                : `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 flex items-center gap-1">
+                                    <i data-lucide="clock" class="w-3 h-3"></i> Belum Dikumpulkan
+                                   </span>`
+                              : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">${totalSubs} Terkumpul</span>`
+                          }
+                        </div>
                         ${
-                          isFuture
-                            ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1">
-                                <i data-lucide="calendar-clock" class="w-3 h-3"></i> Terjadwal
-                               </span>`
+                          isAdmin(user)
+                            ? `<button type="button" data-del-assignment="${esc(asg.id)}" class="p-1 text-rose-500 hover:bg-rose-50 rounded-lg shrink-0" aria-label="Hapus tugas">
+                                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                               </button>`
                             : ""
-                        }
-                        ${
-                          user.role === "praktikan"
-                            ? mySub
-                              ? `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-1">
-                                  <i data-lucide="check-circle-2" class="w-3 h-3"></i> Sudah Dikumpulkan
-                                 </span>`
-                              : `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 flex items-center gap-1">
-                                  <i data-lucide="clock" class="w-3 h-3"></i> Belum Dikumpulkan
-                                 </span>`
-                            : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">${totalSubs} Terkumpul</span>`
                         }
                       </div>
 
@@ -2482,6 +2679,26 @@
       const newAsgBtn = document.getElementById("btn-new-assignment");
       if (newAsgBtn) newAsgBtn.addEventListener("click", openNewAssignmentModal);
 
+      // Optimistic Delete Assignment (0ms — otomatis menghapus file tugas di folder Tugas/)
+      document.querySelectorAll("[data-del-assignment]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-del-assignment");
+          const asg = db.assignments.find((a) => a.id === id);
+          openConfirm({
+            title: "Hapus Tugas?",
+            message: 'File tugas "' + (asg ? asg.title : "") + '" akan dihapus dari folder Tugas Google Drive.',
+            confirmLabel: "Hapus",
+            onConfirm: () => {
+              db.assignments = db.assignments.filter((a) => a.id !== id);
+              persistLocalDb();
+              render();
+              showToast("Tugas dihapus.", "success");
+              enqueueMutation("deleteAssignment", { id });
+            }
+          });
+        });
+      });
+
       document.querySelectorAll("[data-dl-material]").forEach((btn) => {
         btn.addEventListener("click", () => {
           const asg = db.assignments.find((a) => a.id === btn.getAttribute("data-dl-material"));
@@ -3091,6 +3308,13 @@
                         <button type="button" data-save-grade="${esc(sub.id)}" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1">
                           <i data-lucide="save" class="w-3.5 h-3.5"></i> Simpan
                         </button>
+                        ${
+                          existingGrade
+                            ? `<button type="button" data-del-grade="${esc(sub.id)}" class="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl border border-rose-200" aria-label="Hapus nilai">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                               </button>`
+                            : ""
+                        }
                       </div>
                     </div>
                   `;
@@ -3168,6 +3392,22 @@
             classId,
             score
           });
+          openStudentDetailModal(studentId, classId);
+        });
+      });
+
+      // Optimistic Delete Grade (otomatis menghapus file nilai di folder Nilai/)
+      document.querySelectorAll("[data-del-grade]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const submissionId = btn.getAttribute("data-del-grade");
+          const existing = db.grades.find((g) => g.submissionId === submissionId);
+          if (!existing) return;
+          db.grades = db.grades.filter((g) => g.submissionId !== submissionId);
+          persistLocalDb();
+          render();
+          showToast("Nilai dihapus dari folder Nilai.", "success");
+          enqueueMutation("deleteGrade", { id: existing.id, submissionId });
+          openStudentDetailModal(studentId, classId);
         });
       });
     }
